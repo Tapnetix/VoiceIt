@@ -2,7 +2,7 @@
 import '@/i18n';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 
 vi.mock('@/components/AudioTrimmer/AudioTrimmer', async () => {
   const { forwardRef } = await import('react');
@@ -22,7 +22,18 @@ vi.mock('@/components/AudioTrimmer/AudioTrimmer', async () => {
   };
 });
 
-const cloneMutateAsync = vi.fn().mockResolvedValue({ id: 'prof-1' });
+// Observable side-effect log of clone submissions. Each entry is the full
+// payload the component handed to the clone mutation. Tests assert against
+// this array (and against subsequent DOM changes) instead of spy call counts.
+type CloneCall = {
+  bookId: string;
+  charId: string;
+  name: string;
+  file: File;
+  referenceText: string;
+};
+const cloneSubmissions: CloneCall[] = [];
+
 vi.mock('@/lib/hooks/useBooks', () => ({
   useCharacters: () => ({
     data: [{ id: 'c1', name: 'Hero', color: '#fff', confidence: 0.9, dialogue_count: 3 }],
@@ -30,7 +41,13 @@ vi.mock('@/lib/hooks/useBooks', () => ({
   usePreviewCharacter: () => ({ mutate: vi.fn(), data: undefined, isPending: false }),
   useUpdateCharacter: () => ({ mutate: vi.fn(), isPending: false }),
   useVoiceOptions: () => ({ data: undefined }),
-  useCloneVoiceForCharacter: () => ({ mutateAsync: cloneMutateAsync, isPending: false }),
+  useCloneVoiceForCharacter: () => ({
+    mutateAsync: async (payload: CloneCall) => {
+      cloneSubmissions.push(payload);
+      return { id: 'prof-1' };
+    },
+    isPending: false,
+  }),
   useSaveVoiceToLibrary: () => ({ mutate: vi.fn() }),
 }));
 
@@ -91,7 +108,9 @@ vi.mock('@/lib/hooks/useReferenceTranscript', () => ({
 
 import { VoiceEditor } from '@/components/BooksTab/VoiceEditor';
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  cloneSubmissions.length = 0;
+});
 
 describe('VoiceEditor clone transcript (S8, SC5)', () => {
   it('submits the field transcript to the clone mutation, not the placeholder', async () => {
@@ -110,14 +129,20 @@ describe('VoiceEditor clone transcript (S8, SC5)', () => {
     // Click Create clone.
     await userEvent.click(screen.getByTestId('create-clone-btn'));
 
-    await waitFor(() =>
-      expect(cloneMutateAsync).toHaveBeenCalledWith(
-        expect.objectContaining({
-          file: expect.objectContaining({ name: 'reference-trimmed.wav' }),
-          referenceText: 'the real spoken words',
-        }),
-      ),
-    );
+    // Outcome 1: exactly one submission landed at the clone boundary, and
+    // it carried the trimmed file + the transcript written by the hook
+    // (not an empty string and not the dropzone's raw file).
+    await waitFor(() => expect(cloneSubmissions).toHaveLength(1));
+    const submitted = cloneSubmissions[0];
+    expect(submitted.file.name).toBe('reference-trimmed.wav');
+    expect(submitted.referenceText).toBe('the real spoken words');
+    expect(submitted.bookId).toBe('b1');
+    expect(submitted.charId).toBe('c1');
+
+    // Outcome 2: post-clone action row (preview + assign buttons) appears,
+    // which is the user-visible effect of a successful clone resolving.
+    expect(await screen.findByTestId('assign-clone-btn')).toBeInTheDocument();
+    expect(screen.getByTestId('preview-voice-btn')).toBeInTheDocument();
   });
 
   it('renders the reference-transcript field in the clone tab', () => {
