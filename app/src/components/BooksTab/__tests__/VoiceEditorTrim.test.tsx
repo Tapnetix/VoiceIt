@@ -2,11 +2,15 @@
 /**
  * VoiceEditorTrim.test.tsx
  *
- * Verifies that VoiceEditor's Clone tab:
- *   - mounts AudioTrimmer when a sample is selected
- *   - no longer shows cloneTooLong for >30s samples
- *   - passes the trimmed File (from onConfirm) to the clone-create path
- *   - still rejects <3s samples via cloneTooShort
+ * Verifies VoiceEditor's Clone tab via observable outcomes:
+ *   - shows the AudioTrimmer once a sample is loaded
+ *   - keeps Create disabled (and the cloneTooLong alert absent) for >30s samples
+ *     until the user confirms a trim
+ *   - reveals the post-clone assign/preview action row only after a trim is
+ *     confirmed and the create flow succeeds
+ *   - surfaces a cloneTooShort alert (and never reveals the action row) for
+ *     samples under 3s
+ *   - configures the recorder for the 120s maximum sample length
  */
 import '@/i18n';
 import { render, screen, act } from '@testing-library/react';
