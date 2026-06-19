@@ -1,16 +1,13 @@
 /**
  * AudiobookExport component tests (D7)
  *
- * Tests cover:
- * - Renders format radio group (export-format)
- * - Renders metadata section (export-metadata) with title/author inputs and cover drop
- * - Renders action section (export-action) with export-status, start-export-btn, download-btn
- * - download-btn is disabled by default
- * - Clicking start-export-btn calls startExport and enables progress display
- * - On export_complete SSE event, download-btn becomes enabled
- * - Download button label reflects the selected format ("Download .m4b")
- * - Changing format to mp3_single shows correct download label
- * - Error event shows error message in export-status
+ * Tests describe observable behaviour against the rendered UI:
+ * - The export-format / export-metadata / export-action regions and their controls render.
+ * - The download button is disabled until export completes.
+ * - Starting an export flips the start button into its in-progress state and seeds the status area.
+ * - export_progress events update the status percentage; export_complete enables download.
+ * - The download button label reflects the selected format extension.
+ * - Error events surface the message inside export-status.
  */
 /// <reference types="@testing-library/jest-dom/vitest" />
 import '@/i18n';
@@ -33,6 +30,7 @@ vi.mock('@/lib/hooks/useBookProgress', () => ({
 }));
 
 const mockStartExport = vi.fn();
+const mockDownloadExport = vi.fn();
 vi.mock('@/lib/hooks/useBooks', () => ({
   useBook: () => ({
     data: { id: 'book-1', title: 'Test Book', author: 'Jane Doe', status: 'ready' },
@@ -42,7 +40,7 @@ vi.mock('@/lib/hooks/useBooks', () => ({
     isPending: false,
   }),
   useDownloadExport: () => ({
-    mutateAsync: vi.fn().mockResolvedValue(new Blob()),
+    mutateAsync: mockDownloadExport,
     isPending: false,
   }),
 }));
@@ -64,6 +62,8 @@ describe('AudiobookExport', () => {
     errorHandler = undefined;
     mockStartExport.mockClear();
     mockStartExport.mockResolvedValue({ book_id: 'book-1', task_id: 'task-1', status: 'exporting' });
+    mockDownloadExport.mockClear();
+    mockDownloadExport.mockResolvedValue(new Blob());
   });
 
   it('renders the export-format radio group', () => {
@@ -104,12 +104,30 @@ describe('AudiobookExport', () => {
     expect(screen.getByTestId('download-btn')).toBeDisabled();
   });
 
-  it('start-export-btn calls startExport on click', async () => {
+  it('clicking start moves the action into an in-progress state with a starting status', async () => {
     render(<AudiobookExport />);
+
+    const startBtn = screen.getByTestId('start-export-btn');
+    expect(startBtn).toBeEnabled();
+    expect(startBtn).toHaveTextContent(/start export/i);
+
     await act(async () => {
-      fireEvent.click(screen.getByTestId('start-export-btn'));
+      fireEvent.click(startBtn);
     });
-    expect(mockStartExport).toHaveBeenCalledOnce();
+
+    // Observable outcome: the button reflects the running phase and the status area
+    // shows the "starting" message seeded by handleStartExport.
+    expect(screen.getByTestId('start-export-btn')).toBeDisabled();
+    expect(screen.getByTestId('start-export-btn')).toHaveTextContent(/exporting/i);
+    expect(screen.getByTestId('export-status')).toHaveTextContent(/starting export/i);
+  });
+
+  it('selecting mp3_single updates the download button label to .mp3', () => {
+    render(<AudiobookExport />);
+
+    fireEvent.click(screen.getByLabelText(/mp3 \(single file\)/i));
+
+    expect(screen.getByTestId('download-btn')).toHaveTextContent('.mp3');
   });
 
   it('download-btn becomes enabled after export_complete event', async () => {
@@ -181,5 +199,166 @@ describe('AudiobookExport', () => {
     const formatGroup = screen.getByTestId('export-format');
     expect(formatGroup).toHaveTextContent('m4b');
     expect(formatGroup).toHaveTextContent('mp3');
+  });
+
+  it('selecting mp3_per_chapter updates the download button label to .zip', () => {
+    render(<AudiobookExport />);
+
+    fireEvent.click(screen.getByLabelText(/mp3 per chapter/i));
+
+    expect(screen.getByTestId('download-btn')).toHaveTextContent('.zip');
+  });
+
+  it('typing in the title input updates the displayed value', () => {
+    render(<AudiobookExport />);
+    const titleInput = screen.getByLabelText('Title') as HTMLInputElement;
+
+    fireEvent.change(titleInput, { target: { value: 'New Title' } });
+
+    expect(titleInput.value).toBe('New Title');
+  });
+
+  it('typing in the author input updates the displayed value', () => {
+    render(<AudiobookExport />);
+    const authorInput = screen.getByLabelText('Author') as HTMLInputElement;
+
+    fireEvent.change(authorInput, { target: { value: 'New Author' } });
+
+    expect(authorInput.value).toBe('New Author');
+  });
+
+  it('dropping an image file onto cover-drop shows its filename', () => {
+    render(<AudiobookExport />);
+    const dropZone = screen.getByTestId('cover-drop');
+    const file = new File(['cover-bytes'], 'mycover.png', { type: 'image/png' });
+
+    fireEvent.drop(dropZone, {
+      dataTransfer: { files: [file] },
+    });
+
+    expect(dropZone).toHaveTextContent('mycover.png');
+  });
+
+  it('dropping a non-image file onto cover-drop is ignored', () => {
+    render(<AudiobookExport />);
+    const dropZone = screen.getByTestId('cover-drop');
+    const file = new File(['plain'], 'notes.txt', { type: 'text/plain' });
+
+    fireEvent.drop(dropZone, {
+      dataTransfer: { files: [file] },
+    });
+
+    // Drop zone still shows the placeholder copy, not the rejected filename.
+    expect(dropZone).not.toHaveTextContent('notes.txt');
+    expect(dropZone).toHaveTextContent(/drop cover image here/i);
+  });
+
+  it('choosing a file via the hidden cover input shows its filename', () => {
+    render(<AudiobookExport />);
+    const dropZone = screen.getByTestId('cover-drop');
+    const fileInput = dropZone.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['cover'], 'picked.jpg', { type: 'image/jpeg' });
+
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    expect(dropZone).toHaveTextContent('picked.jpg');
+  });
+
+  it('surfaces a failure from startExport as the error status message', async () => {
+    mockStartExport.mockRejectedValueOnce(new Error('network down'));
+    render(<AudiobookExport />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('start-export-btn'));
+    });
+
+    expect(screen.getByTestId('export-status')).toHaveTextContent(/network down/i);
+  });
+
+  it('progress events without a message keep the seeded status text but update the percentage', async () => {
+    render(<AudiobookExport />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('start-export-btn'));
+    });
+
+    act(() => {
+      exportProgressHandler?.({ type: 'export_progress', progress: 33 });
+    });
+
+    const status = screen.getByTestId('export-status');
+    expect(status).toHaveTextContent('33%');
+    expect(status).toHaveTextContent(/starting export/i);
+  });
+
+  it('progress events with a message replace the status text', async () => {
+    render(<AudiobookExport />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('start-export-btn'));
+    });
+
+    act(() => {
+      exportProgressHandler?.({
+        type: 'export_progress',
+        progress: 75,
+        message: 'Encoding chapter 3',
+      });
+    });
+
+    const status = screen.getByTestId('export-status');
+    expect(status).toHaveTextContent('75%');
+    expect(status).toHaveTextContent(/encoding chapter 3/i);
+  });
+
+  it('header shows the book title from useBook data', () => {
+    render(<AudiobookExport />);
+    // The book title from the mocked useBook data is rendered in the header
+    expect(screen.getByText('Test Book')).toBeInTheDocument();
+  });
+
+  it('header back-to-overview button is rendered and clickable', () => {
+    render(<AudiobookExport />);
+    const backBtn = screen.getByRole('button', { name: /back to overview/i });
+    expect(backBtn).toBeInTheDocument();
+    // Clicking does not throw — exercises the setView('overview') handler path.
+    fireEvent.click(backBtn);
+  });
+
+  it('idle status copy is shown before any export action', () => {
+    render(<AudiobookExport />);
+    expect(screen.getByTestId('export-status')).toHaveTextContent(/ready to export/i);
+  });
+
+  it('pressing Enter on the cover drop zone opens the file picker', () => {
+    render(<AudiobookExport />);
+    const dropZone = screen.getByTestId('cover-drop');
+    const fileInput = dropZone.querySelector('input[type="file"]') as HTMLInputElement;
+    const clickSpy = vi.spyOn(fileInput, 'click').mockImplementation(() => {});
+
+    fireEvent.keyDown(dropZone, { key: 'Enter' });
+
+    expect(clickSpy).toHaveBeenCalled();
+    clickSpy.mockRestore();
+  });
+
+  it('clicking the cover drop zone opens the file picker', () => {
+    render(<AudiobookExport />);
+    const dropZone = screen.getByTestId('cover-drop');
+    const fileInput = dropZone.querySelector('input[type="file"]') as HTMLInputElement;
+    const clickSpy = vi.spyOn(fileInput, 'click').mockImplementation(() => {});
+
+    fireEvent.click(dropZone);
+
+    expect(clickSpy).toHaveBeenCalled();
+    clickSpy.mockRestore();
+  });
+
+  it('dragging over the cover drop zone does not change its visible copy', () => {
+    render(<AudiobookExport />);
+    const dropZone = screen.getByTestId('cover-drop');
+    // Exercises the onDragOver preventDefault handler without changing state.
+    fireEvent.dragOver(dropZone);
+    expect(dropZone).toHaveTextContent(/drop cover image here/i);
   });
 });
