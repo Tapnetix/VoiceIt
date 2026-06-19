@@ -4,100 +4,93 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, within, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { BookOverview } from '@/components/BooksTab/BookOverview';
+import { useBooksStore } from '@/stores/booksStore';
 
-// ─── Store mock ───────────────────────────────────────────────────────────────
-const mockSetView = vi.fn();
-const mockSetSelectedChapterId = vi.fn();
-const mockSetSelectedCharacterId = vi.fn();
+// ─── HTTP boundary mock ───────────────────────────────────────────────────────
+// We mock `@/lib/api/client` (the fetch wrapper) — that is the project's HTTP
+// boundary, the same surface a real backend would expose. Everything above it
+// (hooks, store, component) runs as real code so we assert on real outcomes
+// (store state, DOM, request payloads recorded at the boundary), not on spy
+// call counts of first-party collaborators.
 
-vi.mock('@/stores/booksStore', () => ({
-  useBooksStore: (sel: (s: Record<string, unknown>) => unknown) =>
-    sel({
-      selectedBookId: 'b1',
-      setView: mockSetView,
-      setSelectedChapterId: mockSetSelectedChapterId,
-      setSelectedCharacterId: mockSetSelectedCharacterId,
+// Records of calls landing at the apiClient layer. Tests assert against
+// these arrays to verify the network contract (URL params + body shape)
+// without resorting to `toHaveBeenCalled*` spy matchers on first-party
+// hook layers.
+const mergeCalls: Array<{ bookId: string; charId: string; data: { source_char_id: string } }> = [];
+const deleteCalls: Array<{ bookId: string; charId: string }> = [];
+const generateCalls: Array<{ bookId: string; chapterId: string; data?: unknown }> = [];
+
+// Per-test overrides for what the mocked HTTP boundary returns.
+const apiState: {
+  characters: Array<Record<string, unknown>>;
+  generateChapterImpl: (() => Promise<{ task_id: string; queued_segments: number }>) | null;
+} = {
+  characters: [],
+  generateChapterImpl: null,
+};
+
+const baseBook = {
+  id: 'b1',
+  title: 'Silo 42',
+  author: 'Zev Paiss',
+  status: 'analyzed',
+  source_format: 'epub',
+  chapter_count: 2,
+  created_at: '2025-01-01T00:00:00Z',
+  updated_at: '2025-01-01T00:00:00Z',
+  chapters: [
+    { id: 'c1', number: 1, title: 'Descent', word_count: 3410, generation_state: 'none' },
+    { id: 'c2', number: 2, title: 'The Lower Levels', word_count: 4002, generation_state: 'none' },
+  ],
+};
+
+vi.mock('@/lib/api/client', () => ({
+  apiClient: {
+    getBook: vi.fn(async (_id: string) => baseBook),
+    getCharacters: vi.fn(async (_id: string) => apiState.characters),
+    mergeCharacter: vi.fn(async (bookId: string, charId: string, data: { source_char_id: string }) => {
+      mergeCalls.push({ bookId, charId, data });
+      return { id: charId };
     }),
+    deleteCharacter: vi.fn(async (bookId: string, charId: string) => {
+      deleteCalls.push({ bookId, charId });
+    }),
+    generateChapter: vi.fn(async (bookId: string, chapterId: string, data?: unknown) => {
+      generateCalls.push({ bookId, chapterId, data });
+      if (apiState.generateChapterImpl) {
+        return apiState.generateChapterImpl();
+      }
+      return { task_id: 't1', queued_segments: 2 };
+    }),
+    getBookEventsUrl: (bookId: string) => `http://test.local/books/${bookId}/events`,
+  },
 }));
 
-// ─── Hook mocks ───────────────────────────────────────────────────────────────
-const mockMerge = vi.fn().mockResolvedValue(undefined);
-const mockDelete = vi.fn().mockResolvedValue(undefined);
-
-// Mutable character list — tests can swap this to control what useCharacters returns
-let mockCharacters = [
-  {
-    id: 'n',
-    name: 'Narrator',
-    is_narrator: true,
-    color: '#6d8bff',
-    dialogue_count: 0,
-    confidence: 1,
-    voice_type: 'designed',
-    role: undefined,
-    aliases: [],
-  },
-  {
-    id: 'm',
-    name: 'Mira',
-    is_narrator: false,
-    role: 'major',
-    color: '#34d399',
-    dialogue_count: 142,
-    confidence: 0.9,
-    voice_type: 'designed',
-    aliases: [],
-  },
-];
-
-const mockGenerateChapter = vi.fn().mockResolvedValue({ task_id: 't1', queued_segments: 2 });
-
-vi.mock('@/lib/hooks/useBooks', () => ({
-  useBook: () => ({
-    data: {
-      id: 'b1',
-      title: 'Silo 42',
-      author: 'Zev Paiss',
-      status: 'analyzed',
-      source_format: 'epub',
-      chapter_count: 2,
-      created_at: '2025-01-01T00:00:00Z',
-      updated_at: '2025-01-01T00:00:00Z',
-      chapters: [
-        { id: 'c1', number: 1, title: 'Descent', word_count: 3410, generation_state: 'none' },
-        { id: 'c2', number: 2, title: 'The Lower Levels', word_count: 4002, generation_state: 'none' },
-      ],
-    },
-    isLoading: false,
-  }),
-  useCharacters: () => ({
-    data: mockCharacters,
-    isLoading: false,
-  }),
-  useMergeCharacter: () => ({
-    mutateAsync: mockMerge,
-    isPending: false,
-  }),
-  useDeleteCharacter: () => ({
-    mutateAsync: mockDelete,
-    isPending: false,
-  }),
-  useGenerateChapter: () => ({
-    mutateAsync: mockGenerateChapter,
-    isPending: false,
-  }),
-}));
-
-// useBookProgress mock — by default a no-op; tests can replace mockProgressHandlers
+// ─── useBookProgress mock ─────────────────────────────────────────────────────
+// SSE is an external boundary (EventSource → backend). We capture the
+// handlers passed by BookOverview so tests can drive them synchronously
+// without spinning up a real EventSource.
 let mockProgressHandlers: Record<string, ((ev: unknown) => void) | undefined> = {};
 vi.mock('@/lib/hooks/useBookProgress', () => ({
-  useBookProgress: (_bookId: string, handlers: Record<string, ((ev: unknown) => void) | undefined>) => {
+  useBookProgress: (
+    _bookId: string,
+    handlers: Record<string, ((ev: unknown) => void) | undefined>,
+  ) => {
     mockProgressHandlers = handlers;
   },
 }));
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 const wrap = (ui: React.ReactNode) => (
-  <QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>
+  // Each test gets its own QueryClient so cached responses from prior tests
+  // never leak in.
+  <QueryClientProvider client={new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })}>
+    {ui}
+  </QueryClientProvider>
 );
 
 // Default character list (1 narrator + 1 non-narrator)
@@ -126,27 +119,43 @@ const defaultCharacters = [
   },
 ];
 
+/** Renders BookOverview and waits for the loading state to clear. */
+async function renderOverview() {
+  const result = render(wrap(<BookOverview />));
+  await screen.findByTestId('book-header');
+  return result;
+}
+
 describe('BookOverview', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Reset to default fixture (1 narrator + 1 non-narrator)
-    mockCharacters = [...defaultCharacters];
+    // Reset captured network calls
+    mergeCalls.length = 0;
+    deleteCalls.length = 0;
+    generateCalls.length = 0;
+    apiState.characters = [...defaultCharacters];
+    apiState.generateChapterImpl = null;
     mockProgressHandlers = {};
+    // Reset the real store and prime selectedBookId so queries enable
+    useBooksStore.getState().reset();
+    useBooksStore.getState().setSelectedBookId('b1');
   });
 
   // ── Book header ──────────────────────────────────────────────────────────
-  it('renders book-header with title, status badge, and summary meta', () => {
-    render(wrap(<BookOverview />));
+  it('renders book-header with title, status badge, and summary meta', async () => {
+    await renderOverview();
     const header = screen.getByTestId('book-header');
     expect(within(header).getByText('Silo 42')).toBeInTheDocument();
     expect(within(header).getByTestId('book-status')).toBeInTheDocument();
     expect(within(header).getByTestId('book-summary')).toBeInTheDocument();
   });
 
-  it('renders the book-wide cast and per-chapter list (from spec)', () => {
-    render(wrap(<BookOverview />));
-    const cast = screen.getByTestId('cast-roster');
-    expect(within(cast).getByText('Narrator')).toBeInTheDocument();
+  it('renders the book-wide cast and per-chapter list (from spec)', async () => {
+    await renderOverview();
+    const cast = await screen.findByTestId('cast-roster');
+    await waitFor(() => {
+      expect(within(cast).getByText('Narrator')).toBeInTheDocument();
+    });
     expect(within(cast).getByText('Mira')).toBeInTheDocument();
     const chapters = screen.getByTestId('chapter-list');
     expect(within(chapters).getByText(/Descent/)).toBeInTheDocument();
@@ -155,8 +164,8 @@ describe('BookOverview', () => {
   });
 
   // ── Cast roster ──────────────────────────────────────────────────────────
-  it('renders cast-summary with cast-roster and cast-actions', () => {
-    render(wrap(<BookOverview />));
+  it('renders cast-summary with cast-roster and cast-actions', async () => {
+    await renderOverview();
     expect(screen.getByTestId('cast-summary')).toBeInTheDocument();
     expect(screen.getByTestId('cast-roster')).toBeInTheDocument();
     expect(screen.getByTestId('cast-actions')).toBeInTheDocument();
@@ -164,128 +173,129 @@ describe('BookOverview', () => {
     expect(screen.getByTestId('delete-btn')).toBeInTheDocument();
   });
 
-  it('renders one char-card per character', () => {
-    render(wrap(<BookOverview />));
-    const roster = screen.getByTestId('cast-roster');
-    const cards = within(roster).getAllByTestId(/^char-card/);
-    expect(cards).toHaveLength(2);
+  it('renders one char-card per character', async () => {
+    await renderOverview();
+    const roster = await screen.findByTestId('cast-roster');
+    await waitFor(() => {
+      const cards = within(roster).getAllByTestId(/^char-card/);
+      expect(cards).toHaveLength(2);
+    });
   });
 
-  it('narrator has no checkbox (not selectable)', () => {
-    render(wrap(<BookOverview />));
-    const roster = screen.getByTestId('cast-roster');
-    // Only non-narrator characters get a checkbox
-    const checkboxes = within(roster).getAllByRole('checkbox');
-    // Only Mira (non-narrator) gets a checkbox, not Narrator
-    expect(checkboxes).toHaveLength(1);
+  it('narrator has no checkbox (not selectable)', async () => {
+    await renderOverview();
+    const roster = await screen.findByTestId('cast-roster');
+    await waitFor(() => {
+      // Only Mira (non-narrator) gets a checkbox, not Narrator
+      const checkboxes = within(roster).getAllByRole('checkbox');
+      expect(checkboxes).toHaveLength(1);
+    });
   });
 
-  it('non-narrator character has a selectable checkbox', () => {
-    render(wrap(<BookOverview />));
-    const roster = screen.getByTestId('cast-roster');
-    const checkboxes = within(roster).getAllByRole('checkbox');
-    expect(checkboxes).toHaveLength(1);
+  it('non-narrator character has a selectable checkbox', async () => {
+    await renderOverview();
+    const roster = await screen.findByTestId('cast-roster');
+    await waitFor(() => {
+      const checkboxes = within(roster).getAllByRole('checkbox');
+      expect(checkboxes).toHaveLength(1);
+    });
   });
 
   // ── Chapter list ─────────────────────────────────────────────────────────
-  it('renders chapter-list with word count and generation_state badge', () => {
-    render(wrap(<BookOverview />));
+  it('renders chapter-list with word count and generation_state badge', async () => {
+    await renderOverview();
     const chapterList = screen.getByTestId('chapter-list');
     expect(within(chapterList).getByText(/Descent/)).toBeInTheDocument();
     expect(within(chapterList).getByText(/The Lower Levels/)).toBeInTheDocument();
-    // generation_state badges — both are 'none' in the fixture
     const noneBadges = within(chapterList).getAllByText('none');
     expect(noneBadges).toHaveLength(2);
   });
 
-  it('chapter list has Edit links', () => {
-    render(wrap(<BookOverview />));
+  it('chapter list has Edit links', async () => {
+    await renderOverview();
     const chapterList = screen.getByTestId('chapter-list');
     const editBtns = within(chapterList).getAllByText(/edit/i);
     expect(editBtns.length).toBeGreaterThanOrEqual(2);
   });
 
   // ── Header action slots ──────────────────────────────────────────────────
-  it('renders generate-all-btn, export-btn, and audio-settings-btn', () => {
-    render(wrap(<BookOverview />));
+  it('renders generate-all-btn, export-btn, and audio-settings-btn', async () => {
+    await renderOverview();
     expect(screen.getByTestId('generate-all-btn')).toBeInTheDocument();
     expect(screen.getByTestId('export-btn')).toBeInTheDocument();
     expect(screen.getByTestId('audio-settings-btn')).toBeInTheDocument();
   });
 
-  it('renders per-chapter generate buttons', () => {
-    render(wrap(<BookOverview />));
-    // Chapter 1 has generate-chapter-1, chapter 2 has generate-chapter-2
+  it('renders per-chapter generate buttons', async () => {
+    await renderOverview();
     expect(screen.getByTestId('generate-chapter-1')).toBeInTheDocument();
     expect(screen.getByTestId('generate-chapter-2')).toBeInTheDocument();
   });
 
   // ── Drill-in navigation ──────────────────────────────────────────────────
-  it('clicking a character name sets selectedCharacterId and navigates to voice-editor', () => {
-    render(wrap(<BookOverview />));
+  it('clicking a character name navigates to voice-editor for that character', async () => {
+    await renderOverview();
+    await screen.findByTestId('char-link-m');
     fireEvent.click(screen.getByTestId('char-link-m'));
-    expect(mockSetSelectedCharacterId).toHaveBeenCalledWith('m');
-    expect(mockSetView).toHaveBeenCalledWith('voice-editor');
+    // Outcome: real booksStore reflects the navigation (view + selectedCharacterId).
+    await waitFor(() => {
+      const state = useBooksStore.getState();
+      expect(state.view).toBe('voice-editor');
+      expect(state.selectedCharacterId).toBe('m');
+    });
   });
 
-  it('clicking a chapter Edit sets selectedChapterId and navigates to chapter-editor', () => {
-    render(wrap(<BookOverview />));
+  it('clicking a chapter Edit navigates to chapter-editor for that chapter', async () => {
+    await renderOverview();
     const chapterList = screen.getByTestId('chapter-list');
     const editBtns = within(chapterList).getAllByText(/edit/i);
     fireEvent.click(editBtns[0]);
-    expect(mockSetSelectedChapterId).toHaveBeenCalledWith('c1');
-    expect(mockSetView).toHaveBeenCalledWith('chapter-editor');
+    // Outcome: real booksStore reflects the navigation (view + selectedChapterId).
+    await waitFor(() => {
+      const state = useBooksStore.getState();
+      expect(state.view).toBe('chapter-editor');
+      expect(state.selectedChapterId).toBe('c1');
+    });
+  });
+
+  it('clicking export-btn navigates to export view', async () => {
+    await renderOverview();
+    fireEvent.click(screen.getByTestId('export-btn'));
+    await waitFor(() => {
+      expect(useBooksStore.getState().view).toBe('export');
+    });
   });
 
   // ── Cast merge/delete wiring ─────────────────────────────────────────────
-  it('merge-btn is disabled when fewer than 2 characters selected', () => {
-    render(wrap(<BookOverview />));
+  it('merge-btn is disabled when fewer than 2 characters selected', async () => {
+    await renderOverview();
     const mergeBtn = screen.getByTestId('merge-btn');
     expect(mergeBtn).toBeDisabled();
   });
 
-  it('delete-btn is disabled when no character selected', () => {
-    render(wrap(<BookOverview />));
+  it('delete-btn is disabled when no character selected', async () => {
+    await renderOverview();
     const deleteBtn = screen.getByTestId('delete-btn');
     expect(deleteBtn).toBeDisabled();
   });
 
-  it('merge-btn disabled with only 1 selected', () => {
-    render(wrap(<BookOverview />));
-    // Select Mira (only non-narrator in default fixture)
-    const roster = screen.getByTestId('cast-roster');
-    const checkboxes = within(roster).getAllByRole('checkbox');
-    expect(checkboxes.length).toBeGreaterThanOrEqual(1);
+  it('merge-btn disabled with only 1 selected', async () => {
+    await renderOverview();
+    const roster = await screen.findByTestId('cast-roster');
+    let checkboxes: HTMLElement[] = [];
+    await waitFor(() => {
+      checkboxes = within(roster).getAllByRole('checkbox');
+      expect(checkboxes.length).toBeGreaterThanOrEqual(1);
+    });
     fireEvent.click(checkboxes[0]);
-    // With only 1 selected, merge should still be disabled
     expect(screen.getByTestId('merge-btn')).toBeDisabled();
   });
 
-  it('merge-btn enables when 2+ non-narrator characters are selected, and calls useMergeCharacter with correct survivor + source args', async () => {
+  it('merging two non-narrator characters submits the right survivor/source pair and clears the selection', async () => {
     // Override fixture to have 2 non-narrator characters
-    mockCharacters = [
-      {
-        id: 'n',
-        name: 'Narrator',
-        is_narrator: true,
-        color: '#6d8bff',
-        dialogue_count: 0,
-        confidence: 1,
-        voice_type: 'designed',
-        role: undefined,
-        aliases: [],
-      },
-      {
-        id: 'm',
-        name: 'Mira',
-        is_narrator: false,
-        role: 'major',
-        color: '#34d399',
-        dialogue_count: 142,
-        confidence: 0.9,
-        voice_type: 'designed',
-        aliases: [],
-      },
+    apiState.characters = [
+      defaultCharacters[0], // Narrator
+      defaultCharacters[1], // Mira ('m')
       {
         id: 'j',
         name: 'Juliette',
@@ -299,100 +309,142 @@ describe('BookOverview', () => {
       },
     ];
 
-    render(wrap(<BookOverview />));
-    const roster = screen.getByTestId('cast-roster');
-    const checkboxes = within(roster).getAllByRole('checkbox');
-    // Should have 2 checkboxes (Mira + Juliette); Narrator has none
-    expect(checkboxes).toHaveLength(2);
+    await renderOverview();
+    const roster = await screen.findByTestId('cast-roster');
+
+    let checkboxes: HTMLElement[] = [];
+    await waitFor(() => {
+      checkboxes = within(roster).getAllByRole('checkbox');
+      expect(checkboxes).toHaveLength(2);
+    });
 
     // Select both non-narrator characters
     fireEvent.click(checkboxes[0]); // Mira (id: 'm')
     fireEvent.click(checkboxes[1]); // Juliette (id: 'j')
 
-    // merge-btn should now be enabled
+    // merge-btn should now be enabled — an outcome of the selection state.
     const mergeBtn = screen.getByTestId('merge-btn');
-    expect(mergeBtn).not.toBeDisabled();
+    await waitFor(() => {
+      expect(mergeBtn).not.toBeDisabled();
+    });
 
-    // Click merge
     fireEvent.click(mergeBtn);
 
-    // useMergeCharacter.mutateAsync should be called once (1 source merging into survivor)
-    // Survivor is the first selected (m), source is the second (j)
+    // Outcome 1: the HTTP boundary received exactly one merge request
+    // with the first-selected as survivor and second-selected as source.
     await waitFor(() => {
-      expect(mockMerge).toHaveBeenCalledTimes(1);
-      expect(mockMerge).toHaveBeenCalledWith({
-        bookId: 'b1',
-        charId: 'm',
-        data: { source_char_id: 'j' },
-      });
+      expect(mergeCalls).toHaveLength(1);
+    });
+    expect(mergeCalls[0]).toEqual({
+      bookId: 'b1',
+      charId: 'm',
+      data: { source_char_id: 'j' },
+    });
+
+    // Outcome 2: post-merge the cast selection clears, so every visible
+    // checkbox is back to unchecked (also reflected by merge-btn going
+    // disabled again because <2 are selected).
+    await waitFor(() => {
+      const cbs = within(roster).getAllByRole('checkbox') as HTMLInputElement[];
+      for (const cb of cbs) {
+        expect(cb).not.toBeChecked();
+      }
+      expect(screen.getByTestId('merge-btn')).toBeDisabled();
     });
   });
 
-  it('delete-btn enables when exactly 1 non-narrator character is selected', () => {
-    render(wrap(<BookOverview />));
-    const roster = screen.getByTestId('cast-roster');
-    const checkboxes = within(roster).getAllByRole('checkbox');
+  it('delete-btn enables when exactly 1 non-narrator character is selected', async () => {
+    await renderOverview();
+    const roster = await screen.findByTestId('cast-roster');
+    let checkboxes: HTMLElement[] = [];
+    await waitFor(() => {
+      checkboxes = within(roster).getAllByRole('checkbox');
+      expect(checkboxes.length).toBeGreaterThanOrEqual(1);
+    });
     fireEvent.click(checkboxes[0]);
     expect(screen.getByTestId('delete-btn')).not.toBeDisabled();
   });
 
-  it('delete-btn shows confirm dialog and calls useDeleteCharacter on confirm', async () => {
-    render(wrap(<BookOverview />));
-    const roster = screen.getByTestId('cast-roster');
-    const checkboxes = within(roster).getAllByRole('checkbox');
+  it('confirming the delete dialog issues the delete request, clears selection, and closes the dialog', async () => {
+    await renderOverview();
+    const roster = await screen.findByTestId('cast-roster');
+    let checkboxes: HTMLElement[] = [];
+    await waitFor(() => {
+      checkboxes = within(roster).getAllByRole('checkbox');
+      expect(checkboxes.length).toBeGreaterThanOrEqual(1);
+    });
     fireEvent.click(checkboxes[0]); // select Mira
+
     const deleteBtn = screen.getByTestId('delete-btn');
     expect(deleteBtn).not.toBeDisabled();
     fireEvent.click(deleteBtn);
-    // Alert dialog should appear — wait for it
-    await screen.findByRole('button', { name: /delete/i });
-    // Find the confirmation dialog confirm button (not the cast-actions delete-btn)
+
+    // Confirmation dialog must appear before we can confirm.
+    await screen.findByRole('alertdialog');
     const confirmBtns = screen.getAllByRole('button', { name: /delete/i });
-    // The confirm button in dialog is the one that fires the mutation
-    // Click the last one (dialog confirm)
+    // The confirm button in the dialog is the last "delete"-labelled button.
     fireEvent.click(confirmBtns[confirmBtns.length - 1]);
+
+    // Outcome 1: a delete request reached the HTTP boundary with the right ids.
     await waitFor(() => {
-      expect(mockDelete).toHaveBeenCalled();
+      expect(deleteCalls).toHaveLength(1);
+    });
+    expect(deleteCalls[0]).toEqual({ bookId: 'b1', charId: 'm' });
+
+    // Outcome 2: the alert dialog is no longer in the document.
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+
+    // Outcome 3: cast selection cleared — checkbox unchecked + delete-btn re-disabled.
+    await waitFor(() => {
+      const cbs = within(roster).getAllByRole('checkbox') as HTMLInputElement[];
+      for (const cb of cbs) {
+        expect(cb).not.toBeChecked();
+      }
+      expect(screen.getByTestId('delete-btn')).toBeDisabled();
     });
   });
 
   // ── Summary derivation ───────────────────────────────────────────────────
-  it('derives summary stats (chapter count, character count) from queries', () => {
-    render(wrap(<BookOverview />));
+  it('derives summary stats (chapter count, character count) from queries', async () => {
+    await renderOverview();
     const summary = screen.getByTestId('book-summary');
-    expect(within(summary).getByText(/2 chapter/i)).toBeInTheDocument();
-    expect(within(summary).getByText(/2 character/i)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(within(summary).getByText(/2 chapter/i)).toBeInTheDocument();
+      expect(within(summary).getByText(/2 character/i)).toBeInTheDocument();
+    });
   });
 
   // ── Generate chapter wiring (D2) ─────────────────────────────────────────
 
-  it('generate-chapter buttons are rendered for each chapter', () => {
-    render(wrap(<BookOverview />));
-    const btn1 = screen.getByTestId('generate-chapter-1');
-    const btn2 = screen.getByTestId('generate-chapter-2');
-    expect(btn1).toBeInTheDocument();
-    expect(btn2).toBeInTheDocument();
+  it('generate-chapter buttons are rendered for each chapter', async () => {
+    await renderOverview();
+    expect(screen.getByTestId('generate-chapter-1')).toBeInTheDocument();
+    expect(screen.getByTestId('generate-chapter-2')).toBeInTheDocument();
   });
 
-  it('generate-chapter button is enabled when chapter is not generating', () => {
-    render(wrap(<BookOverview />));
+  it('generate-chapter button is enabled when chapter is not generating', async () => {
+    await renderOverview();
     const btn1 = screen.getByTestId('generate-chapter-1');
     expect(btn1).not.toBeDisabled();
   });
 
-  it('clicking generate-chapter-1 calls useGenerateChapter with correct ids', async () => {
-    render(wrap(<BookOverview />));
+  it('clicking generate-chapter-1 sends a generate request for that book + chapter', async () => {
+    await renderOverview();
     const btn1 = screen.getByTestId('generate-chapter-1');
     fireEvent.click(btn1);
+    // Outcome: a single generate request hit the HTTP boundary scoped to
+    // bookId 'b1' + chapterId 'c1'. We assert on the captured payload
+    // (not on a spy call-count matcher).
     await waitFor(() => {
-      expect(mockGenerateChapter).toHaveBeenCalledWith(
-        expect.objectContaining({ bookId: 'b1', chapterId: 'c1' })
-      );
+      expect(generateCalls).toHaveLength(1);
     });
+    expect(generateCalls[0]).toMatchObject({ bookId: 'b1', chapterId: 'c1' });
   });
 
   it('generation_progress event updates chapter row to show "generating n/m"', async () => {
-    render(wrap(<BookOverview />));
+    await renderOverview();
     // Simulate useBookProgress firing a generation_progress event
     act(() => {
       mockProgressHandlers.onGenerationProgress?.({
@@ -404,7 +456,6 @@ describe('BookOverview', () => {
         overall_progress: 0.33,
       });
     });
-    // Chapter row should show progress indicator
     await waitFor(() => {
       const chapterList = screen.getByTestId('chapter-list');
       expect(within(chapterList).getByText(/generating 1\/3/i)).toBeInTheDocument();
@@ -412,7 +463,7 @@ describe('BookOverview', () => {
   });
 
   it('generation_complete event flips chapter row to done badge', async () => {
-    render(wrap(<BookOverview />));
+    await renderOverview();
     // First simulate a progress event to get into generating state
     act(() => {
       mockProgressHandlers.onGenerationProgress?.({
@@ -440,8 +491,8 @@ describe('BookOverview', () => {
   it('generate-chapter button is disabled while that chapter is generating', async () => {
     // Keep the generate mutation pending so the chapter stays in the in-flight
     // set (the finally-clause that re-enables the button never runs).
-    mockGenerateChapter.mockReturnValueOnce(new Promise(() => {}));
-    render(wrap(<BookOverview />));
+    apiState.generateChapterImpl = () => new Promise(() => {});
+    await renderOverview();
     const btn1 = screen.getByTestId('generate-chapter-1');
     expect(btn1).not.toBeDisabled();
     // Click to trigger generation — the row is marked in-flight synchronously.
