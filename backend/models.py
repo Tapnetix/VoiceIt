@@ -31,6 +31,8 @@ class VoiceProfileCreate(BaseModel):
 class VoiceProfileResponse(BaseModel):
     """Response model for voice profile."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     description: Optional[str]
@@ -48,9 +50,6 @@ class VoiceProfileResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class ProfileSampleCreate(BaseModel):
     """Request model for adding a sample to a profile."""
@@ -67,13 +66,12 @@ class ProfileSampleUpdate(BaseModel):
 class ProfileSampleResponse(BaseModel):
     """Response model for profile sample."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     profile_id: str
     audio_path: str
     reference_text: str
-
-    class Config:
-        from_attributes = True
 
 
 class GenerationRequest(BaseModel):
@@ -105,6 +103,8 @@ class GenerationRequest(BaseModel):
 class GenerationResponse(BaseModel):
     """Response model for voice generation."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     profile_id: str
     text: str
@@ -123,9 +123,6 @@ class GenerationResponse(BaseModel):
     versions: Optional[List["GenerationVersionResponse"]] = None
     active_version_id: Optional[str] = None
 
-    class Config:
-        from_attributes = True
-
 
 class HistoryQuery(BaseModel):
     """Query model for generation history."""
@@ -138,6 +135,8 @@ class HistoryQuery(BaseModel):
 
 class HistoryResponse(BaseModel):
     """Response model for history entry (includes profile name)."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: str
     profile_id: str
@@ -156,9 +155,6 @@ class HistoryResponse(BaseModel):
     created_at: datetime
     versions: Optional[List["GenerationVersionResponse"]] = None
     active_version_id: Optional[str] = None
-
-    class Config:
-        from_attributes = True
 
 
 class HistoryListResponse(BaseModel):
@@ -193,6 +189,8 @@ class RefinementFlagsModel(BaseModel):
 class CaptureResponse(BaseModel):
     """Response model for a capture."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     audio_path: str
     source: str
@@ -204,9 +202,6 @@ class CaptureResponse(BaseModel):
     llm_model: Optional[str] = None
     refinement_flags: Optional[RefinementFlagsModel] = None
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class CaptureListResponse(BaseModel):
@@ -248,6 +243,8 @@ class CaptureRetranscribeRequest(BaseModel):
 class CaptureSettingsResponse(BaseModel):
     """Server-persisted defaults for the capture / refine flow."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     stt_model: str = Field(default="turbo", pattern="^(base|small|medium|large|turbo)$")
     language: str = Field(default="auto")
     auto_refine: bool = True
@@ -264,9 +261,6 @@ class CaptureSettingsResponse(BaseModel):
     chord_toggle_to_talk_keys: List[str] = Field(
         default_factory=default_toggle_to_talk_chord
     )
-
-    class Config:
-        from_attributes = True
 
 
 class CaptureSettingsUpdate(BaseModel):
@@ -289,13 +283,12 @@ class CaptureSettingsUpdate(BaseModel):
 class GenerationSettingsResponse(BaseModel):
     """Server-persisted defaults for the generation flow."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     max_chunk_chars: int = Field(default=800, ge=100, le=5000)
     crossfade_ms: int = Field(default=50, ge=0, le=500)
     normalize_audio: bool = True
     autoplay_on_generate: bool = True
-
-    class Config:
-        from_attributes = True
 
 
 class GenerationSettingsUpdate(BaseModel):
@@ -312,6 +305,8 @@ class MCPClientBindingResponse(BaseModel):
     use when a given client_id calls voiceit.speak without args, plus an
     opt-in personality-rewrite default."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     client_id: str
     label: Optional[str] = None
     profile_id: Optional[str] = None
@@ -323,9 +318,6 @@ class MCPClientBindingResponse(BaseModel):
     last_seen_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class MCPClientBindingUpsert(BaseModel):
@@ -540,14 +532,13 @@ class AudioChannelUpdate(BaseModel):
 class AudioChannelResponse(BaseModel):
     """Response model for audio channel."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     is_default: bool
     device_ids: List[str]
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class ChannelVoiceAssignment(BaseModel):
@@ -572,6 +563,8 @@ class StoryCreate(BaseModel):
 class StoryResponse(BaseModel):
     """Response model for story (list view)."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     description: Optional[str]
@@ -579,12 +572,11 @@ class StoryResponse(BaseModel):
     updated_at: datetime
     item_count: int = 0
 
-    class Config:
-        from_attributes = True
-
 
 class StoryItemDetail(BaseModel):
     """Detail model for story item with generation info."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: str
     story_id: str
@@ -611,12 +603,11 @@ class StoryItemDetail(BaseModel):
     versions: Optional[List["GenerationVersionResponse"]] = None
     active_version_id: Optional[str] = None
 
-    class Config:
-        from_attributes = True
-
 
 class StoryDetailResponse(BaseModel):
     """Response model for story with items."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: str
     name: str
@@ -624,9 +615,6 @@ class StoryDetailResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     items: List[StoryItemDetail] = []
-
-    class Config:
-        from_attributes = True
 
 
 class StoryItemCreate(BaseModel):
@@ -726,6 +714,8 @@ class EffectPresetUpdate(BaseModel):
 class EffectPresetResponse(BaseModel):
     """Response model for effect preset."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     description: Optional[str] = None
@@ -733,12 +723,11 @@ class EffectPresetResponse(BaseModel):
     is_builtin: bool = False
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class GenerationVersionResponse(BaseModel):
     """Response model for a generation version."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: str
     generation_id: str
@@ -748,9 +737,6 @@ class GenerationVersionResponse(BaseModel):
     source_version_id: Optional[str] = None
     is_default: bool
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class ApplyEffectsRequest(BaseModel):
