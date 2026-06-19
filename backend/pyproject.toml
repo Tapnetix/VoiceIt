@@ -89,7 +89,17 @@ asyncio_mode = "auto"
 # ---------------------------------------------------------------------------
 [tool.coverage.run]
 source = ["backend"]
-omit = ["backend/tests/*", "backend/build_binary.py"]
+omit = [
+  "backend/tests/**",
+  "backend/build_binary.py",
+  "backend/backends/**",
+  "backend/main.py",
+  "backend/app.py",
+  "backend/server.py",
+  "backend/mcp_shim/**",
+  "backend/pyi_rth_numpy_compat.py",
+  "backend/pyi_rth_torch_compiler_disable.py",
+]
 
 [tool.coverage.report]
 show_missing = true
