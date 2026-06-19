@@ -111,8 +111,11 @@ describe('VoiceEditor (Clone)', () => {
     expect(screen.getByTestId('clone-dropzone')).toBeInTheDocument();
     await uploadAndConfirm(u, new File([new Uint8Array(16)], 'mira.wav', { type: 'audio/wav' }));
     await u.click(screen.getByTestId('create-clone-btn'));
-    expect(createClone).toHaveBeenCalled();
-    expect(screen.getByTestId('assign-clone-btn')).toBeInTheDocument();
+    // Outcome: assign-clone-btn and the in-row preview-voice-btn render only
+    // when clonedProfileId is set after a successful clone.
+    expect(await screen.findByTestId('assign-clone-btn')).toBeInTheDocument();
+    const previewBtns = await screen.findAllByTestId('preview-voice-btn');
+    expect(previewBtns.length).toBeGreaterThan(0);
   });
 
   it('calls createClone with bookId, charId, name, and file', async () => {
@@ -172,28 +175,25 @@ describe('VoiceEditor (Clone)', () => {
 
   // ── Fix 2: preview-voice-btn re-triggers preview ──────────────────────────
 
-  it('clicking preview-voice-btn after clone triggers the preview mutation', async () => {
+  it('clicking preview-voice-btn after clone requests a preview using the cloned profile_id', async () => {
     const u = userEvent.setup();
     render(<VoiceEditor initialTab="clone" />);
     await uploadAndConfirm(u, new File([new Uint8Array(16)], 'mira.wav', { type: 'audio/wav' }));
     await u.click(screen.getByTestId('create-clone-btn'));
-
-    // onCloned auto-triggers preview once; record the call count before the btn click
-    const callsAfterAutoPreview = previewMutate.mock.calls.length;
 
     // preview-voice-btn in the clone action row appears after clone succeeds.
     // There are two buttons with this testid (clone row + design bottom row);
     // the first one belongs to the clone action row.
     const previewBtns = await screen.findAllByTestId('preview-voice-btn');
     const clonePreviewBtn = previewBtns[0];
+    // Clear prior payloads (including the auto-preview that fires on clone success)
+    // so the next assertion captures only the payload from the button click.
+    previewMutate.mockClear();
     await u.click(clonePreviewBtn);
 
-    // Should have been called at least once more than after the auto-preview
-    expect(previewMutate.mock.calls.length).toBeGreaterThan(callsAfterAutoPreview);
-    // The final call should use the cloned profile_id
-    const calls = previewMutate.mock.calls;
-    const lastCall = calls[calls.length - 1][0];
-    expect(lastCall).toMatchObject({
+    // Outcome: a preview is requested at the HTTP boundary with the cloned profile_id.
+    // We assert payload (observable I/O), not call existence.
+    expect(previewMutate.mock.calls[0]?.[0]).toMatchObject({
       charId: 'm',
       data: { profile_id: 'cloned-1' },
     });
@@ -220,8 +220,11 @@ describe('VoiceEditor (Clone)', () => {
 
     await u.click(screen.getByTestId('create-clone-btn'));
 
+    // Outcome 1: an alert with the "too short" message is rendered.
     expect(await screen.findByRole('alert')).toHaveTextContent(/too short/i);
-    expect(createClone).not.toHaveBeenCalled();
+    // Outcome 2: clone did not succeed — the assign action row never appears
+    // (it only renders when clonedProfileId is set on a successful clone).
+    expect(screen.queryByTestId('assign-clone-btn')).not.toBeInTheDocument();
   });
 
   it('does NOT reject a >30s recorded sample — AudioTrimmer handles long samples', async () => {
@@ -240,12 +243,13 @@ describe('VoiceEditor (Clone)', () => {
 
     await u.click(screen.getByTestId('create-clone-btn'));
 
-    // No "too long" alert; clone proceeds
+    // Outcome: clone proceeded — assign-clone-btn appears (renders only on
+    // successful clone) and no "too long" error alert is shown.
+    expect(await screen.findByTestId('assign-clone-btn')).toBeInTheDocument();
     const alert = screen.queryByRole('alert');
     if (alert) {
       expect(alert).not.toHaveTextContent(/too long/i);
     }
-    expect(createClone).toHaveBeenCalled();
   });
 
   it('does not block upload when sample duration is exactly at boundaries (3 s and 30 s)', async () => {
@@ -259,7 +263,9 @@ describe('VoiceEditor (Clone)', () => {
       capturedTrimmerOnConfirm?.(new File(['audio'], 'trimmed.wav', { type: 'audio/wav' }), 3);
     });
     await u.click(screen.getByTestId('create-clone-btn'));
-    expect(createClone).toHaveBeenCalled();
+    // Outcome: clone succeeded — assign-clone-btn rendered, and no inline error.
+    expect(await screen.findByTestId('assign-clone-btn')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     unmount();
 
     // Test 30 s exactly (should pass)
@@ -275,6 +281,8 @@ describe('VoiceEditor (Clone)', () => {
       capturedTrimmerOnConfirm?.(new File(['audio'], 'trimmed.wav', { type: 'audio/wav' }), 30);
     });
     await u.click(screen.getByTestId('create-clone-btn'));
-    expect(createClone).toHaveBeenCalled();
+    // Same outcome on the upper boundary.
+    expect(await screen.findByTestId('assign-clone-btn')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
