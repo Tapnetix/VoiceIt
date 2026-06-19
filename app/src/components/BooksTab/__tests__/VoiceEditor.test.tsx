@@ -1,4 +1,13 @@
 /// <reference types="@testing-library/jest-dom/vitest" />
+//
+// VoiceEditor — behaviour tests.
+//
+// Quality bar (SC8): no `toHaveBeenCalled*` spy assertions in this file.
+// View / character-selection transitions are observed against the real
+// booksStore (Zustand) and the re-rendered DOM; hook-layer mutations are
+// observed by capturing the request payload that crossed the boundary
+// into a module-level variable and reading it as data.
+//
 import '@/i18n';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
