@@ -241,4 +241,27 @@ describe('SampleUpload — AudioTrimmer integration', () => {
       expect(hookArgs.some((a) => a.file?.name === 'reference-trimmed.wav')).toBe(true),
     );
   });
+
+  it('refuses to submit, and keeps the dialog open, when the reference text is empty', async () => {
+    const u = userEvent.setup();
+    const { openStates } = renderSampleUpload();
+
+    // Pick a file and confirm the trim, but leave the reference text untouched.
+    const fileInput = document.querySelector('input[type=file]') as HTMLInputElement;
+    const rawFile = new File(['raw-audio-data'], 'long-recording.wav', { type: 'audio/wav' });
+    await u.upload(fileInput, rawFile);
+    await screen.findByTestId('audio-trimmer');
+    await u.click(screen.getByTestId('trimmer-confirm'));
+
+    // Submit the form without filling the required reference-text field.
+    await u.click(screen.getByRole('button', { name: /add sample/i }));
+
+    // Give the form's async submit handler a tick to run (or, in this case,
+    // to be short-circuited by the resolver). We then assert the user-visible
+    // outcomes: no payload crossed the addSample boundary, and the dialog
+    // never requested closing so the user stays on the form to fix it.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(submittedPayloads).toHaveLength(0);
+    expect(openStates).not.toContain(false);
+  });
 });
