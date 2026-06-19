@@ -1,19 +1,15 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { renderHook } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import React from 'react';
 
-const createProfile = vi.fn();
-const addProfileSample = vi.fn();
-vi.mock('@/lib/api/client', () => ({
-  apiClient: {
-    createProfile: (...a: unknown[]) => createProfile(...a),
-    addProfileSample: (...a: unknown[]) => addProfileSample(...a),
-  },
-}));
-
 import { useCloneVoiceForCharacter } from '@/lib/hooks/useBooks';
+
+// SC8 boundary: stub the HTTP boundary (globalThis.fetch), not the first-party
+// apiClient module. Each test asserts on the observable outcome — the request
+// body submitted to POST /profiles/{id}/samples — rather than internal call
+// counts on a project-owned mock.
 
 function wrapper({ children }: { children: ReactNode }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -22,29 +18,62 @@ function wrapper({ children }: { children: ReactNode }) {
 
 const file = new File(['x'], 'clip.wav', { type: 'audio/wav' });
 
+const ok = (body: unknown) =>
+  Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve(body),
+  } as Response);
+
+type SamplesRequest = { url: string; formData: FormData };
+
+function spyOnFetch(): { samplesRequests: SamplesRequest[] } {
+  const samplesRequests: SamplesRequest[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = typeof input === 'string' ? input : (input as Request).url ?? String(input);
+    if (url.endsWith('/profiles') && (init as RequestInit | undefined)?.method === 'POST') {
+      return ok({ id: 'prof-1', name: 'Hero (cloned)' }) as unknown as Response;
+    }
+    if (/\/profiles\/[^/]+\/samples$/.test(url)) {
+      samplesRequests.push({ url, formData: (init as RequestInit).body as FormData });
+      return ok({ id: 'sample-1' }) as unknown as Response;
+    }
+    throw new Error(`unstubbed fetch: ${url}`);
+  });
+  return { samplesRequests };
+}
+
 beforeEach(() => {
-  vi.clearAllMocks();
-  createProfile.mockResolvedValue({ id: 'prof-1' });
-  addProfileSample.mockResolvedValue({});
+  vi.restoreAllMocks();
 });
 
-describe('useCloneVoiceForCharacter referenceText forwarding', () => {
-  it('forwards the user transcript to addProfileSample (SC5)', async () => {
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('useCloneVoiceForCharacter reference_text submission (SC5)', () => {
+  it('submits the user-provided transcript verbatim to the samples endpoint', async () => {
+    const { samplesRequests } = spyOnFetch();
     const { result } = renderHook(() => useCloneVoiceForCharacter(), { wrapper });
-    await result.current.mutateAsync({
+
+    const profile = await result.current.mutateAsync({
       bookId: 'b1',
       charId: 'c1',
       name: 'Hero (cloned)',
       file,
       referenceText: 'the real spoken words',
     });
-    await waitFor(() =>
-      expect(addProfileSample).toHaveBeenCalledWith('prof-1', file, 'the real spoken words'),
-    );
+
+    expect(profile).toMatchObject({ id: 'prof-1' });
+    expect(samplesRequests).toHaveLength(1);
+    expect(samplesRequests[0].url).toMatch(/\/profiles\/prof-1\/samples$/);
+    expect(samplesRequests[0].formData.get('reference_text')).toBe('the real spoken words');
+    expect(samplesRequests[0].formData.get('file')).toBe(file);
   });
 
-  it('falls back to the placeholder when referenceText is blank (SC5)', async () => {
+  it('substitutes the placeholder when the transcript is whitespace-only', async () => {
+    const { samplesRequests } = spyOnFetch();
     const { result } = renderHook(() => useCloneVoiceForCharacter(), { wrapper });
+
     await result.current.mutateAsync({
       bookId: 'b1',
       charId: 'c1',
@@ -52,29 +81,27 @@ describe('useCloneVoiceForCharacter referenceText forwarding', () => {
       file,
       referenceText: '   ',
     });
-    await waitFor(() =>
-      expect(addProfileSample).toHaveBeenCalledWith(
-        'prof-1',
-        file,
-        'Reference voice sample for cloning.',
-      ),
+
+    expect(samplesRequests).toHaveLength(1);
+    expect(samplesRequests[0].formData.get('reference_text')).toBe(
+      'Reference voice sample for cloning.',
     );
   });
 
-  it('falls back to the placeholder when referenceText is omitted (SC5)', async () => {
+  it('substitutes the placeholder when no transcript is provided', async () => {
+    const { samplesRequests } = spyOnFetch();
     const { result } = renderHook(() => useCloneVoiceForCharacter(), { wrapper });
+
     await result.current.mutateAsync({
       bookId: 'b1',
       charId: 'c1',
       name: 'Hero (cloned)',
       file,
     });
-    await waitFor(() =>
-      expect(addProfileSample).toHaveBeenCalledWith(
-        'prof-1',
-        file,
-        'Reference voice sample for cloning.',
-      ),
+
+    expect(samplesRequests).toHaveLength(1);
+    expect(samplesRequests[0].formData.get('reference_text')).toBe(
+      'Reference voice sample for cloning.',
     );
   });
 });

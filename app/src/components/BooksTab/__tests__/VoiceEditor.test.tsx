@@ -4,32 +4,39 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { VoiceEditor } from '@/components/BooksTab/VoiceEditor';
+import { useBooksStore } from '@/stores/booksStore';
 
-// ─── Store mock ───────────────────────────────────────────────────────────────
+// ─── Hook mock state ──────────────────────────────────────────────────────────
+//
+// The hook layer is the system's boundary to the server. We capture the payloads
+// the component sends through that boundary into module-level variables so the
+// tests can inspect them as outcomes (the request shape that crossed the
+// boundary) rather than asserting on call counts of internal spies. Where the
+// mutation has a success/error callback contract, the mock drives it from the
+// requested `outcome` to observe the resulting DOM / store change.
 
-const mockSetSelectedCharacterId = vi.fn();
-const mockSetView = vi.fn();
+interface PreviewPayload {
+  charId: string;
+  data: {
+    design_prompt?: string;
+    profile_id?: string;
+    preset_voice_id?: string;
+  };
+}
 
-let storeState: {
-  selectedBookId: string | null;
-  selectedCharacterId: string | null;
-  setSelectedCharacterId: ReturnType<typeof vi.fn>;
-  setView: ReturnType<typeof vi.fn>;
-} = {
-  selectedBookId: 'b1',
-  selectedCharacterId: 'm',
-  setSelectedCharacterId: mockSetSelectedCharacterId,
-  setView: mockSetView,
-};
+interface UpdatePayload {
+  bookId: string;
+  charId: string;
+  data: {
+    design_prompt?: string;
+    profile_id?: string;
+    preset_voice_id?: string;
+  };
+}
 
-vi.mock('@/stores/booksStore', () => ({
-  useBooksStore: (s: any) => s(storeState),
-}));
-
-// ─── Hook mocks ───────────────────────────────────────────────────────────────
-
-const previewMutate = vi.fn();
-const updateMutate = vi.fn();
+let lastPreviewPayload: PreviewPayload | null = null;
+let lastUpdatePayload: UpdatePayload | null = null;
+let updateOutcome: 'success' | 'pending' = 'pending';
 
 let previewData: { generation_id: string; audio_path: string } | undefined = {
   generation_id: 'g1',
@@ -70,11 +77,22 @@ vi.mock('@/lib/hooks/useBooks', () => ({
     data: characterList,
   }),
   usePreviewCharacter: () => ({
-    mutate: previewMutate,
+    mutate: (payload: PreviewPayload) => {
+      lastPreviewPayload = payload;
+    },
     data: previewData,
     isPending: false,
   }),
-  useUpdateCharacter: () => ({ mutate: updateMutate, isPending: false }),
+  useUpdateCharacter: () => ({
+    mutate: (
+      payload: UpdatePayload,
+      opts?: { onSuccess?: () => void; onError?: (err: Error) => void },
+    ) => {
+      lastUpdatePayload = payload;
+      if (updateOutcome === 'success') opts?.onSuccess?.();
+    },
+    isPending: false,
+  }),
   useVoiceOptions: () => ({ data: { library: [], book: [], presets: [] } }),
   useCloneVoiceForCharacter: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useSaveVoiceToLibrary: () => ({ mutate: vi.fn(), isPending: false }),
@@ -116,12 +134,20 @@ vi.mock('@/lib/hooks/useReferenceTranscript', () => ({
 describe('VoiceEditor (Design)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    storeState = {
-      selectedBookId: 'b1',
-      selectedCharacterId: 'm',
-      setSelectedCharacterId: mockSetSelectedCharacterId,
-      setView: mockSetView,
-    };
+
+    // Reset captured boundary payloads.
+    lastPreviewPayload = null;
+    lastUpdatePayload = null;
+    updateOutcome = 'pending';
+
+    // Use the real booksStore so view/selection changes become observable
+    // state, not spy calls. We seed it to mirror an open VoiceEditor session
+    // (a book is selected and Mira is the focused character).
+    useBooksStore.getState().reset();
+    useBooksStore.getState().setSelectedBookId('b1');
+    useBooksStore.getState().setSelectedCharacterId('m');
+    useBooksStore.getState().setView('voice-editor');
+
     previewData = { generation_id: 'g1', audio_path: '/audio/g1' };
     characterList = [
       {
@@ -162,11 +188,12 @@ describe('VoiceEditor (Design)', () => {
     expect(screen.queryByTestId('export-btn')).not.toBeInTheDocument();
   });
 
-  it('generates a preview of the assigned voice', async () => {
+  it('clicking preview-voice-btn sends a preview request for the current character', async () => {
     const u = userEvent.setup();
     render(<VoiceEditor />);
     await u.click(screen.getByTestId('preview-voice-btn'));
-    expect(previewMutate).toHaveBeenCalled();
+    expect(lastPreviewPayload).not.toBeNull();
+    expect(lastPreviewPayload?.charId).toBe('m');
   });
 
   it('renders the 3-tab scaffold: Library, Clone, Design', () => {
@@ -203,21 +230,21 @@ describe('VoiceEditor (Design)', () => {
     expect(screen.getByTestId('character-switcher')).toHaveTextContent('Mira');
   });
 
-  it('back-to-overview button calls setView("overview")', async () => {
+  it('back-to-overview button navigates the books view to overview', async () => {
     const u = userEvent.setup();
     render(<VoiceEditor />);
     await u.click(screen.getByTestId('back-to-overview'));
-    expect(mockSetView).toHaveBeenCalledWith('overview');
+    expect(useBooksStore.getState().view).toBe('overview');
   });
 
-  it('assign-voice-btn calls updateMutate with design_prompt', async () => {
+  it('assign-voice-btn submits the design prompt for the current book and character', async () => {
     const u = userEvent.setup();
     render(<VoiceEditor />);
     await u.click(screen.getByTestId('assign-voice-btn'));
-    expect(updateMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ bookId: 'b1', charId: 'm' }),
-      expect.any(Object),
-    );
+    expect(lastUpdatePayload).not.toBeNull();
+    expect(lastUpdatePayload?.bookId).toBe('b1');
+    expect(lastUpdatePayload?.charId).toBe('m');
+    expect(lastUpdatePayload?.data.design_prompt).toBe('warm, resolute');
   });
 
   it('design-prompt textarea is pre-filled with vocal_description', () => {
@@ -235,23 +262,27 @@ describe('VoiceEditor (Design)', () => {
     expect(textarea.value).toBe('bold, loud');
   });
 
-  it('character switcher next button calls setSelectedCharacterId', async () => {
+  it('character-switcher next button advances to the next character and updates the UI', async () => {
     const u = userEvent.setup();
     render(<VoiceEditor />);
     const switcher = screen.getByTestId('character-switcher');
     // The ▶ button is the second button in the switcher
     const btns = switcher.querySelectorAll('button');
     await u.click(btns[1]); // ▶ next
-    expect(mockSetSelectedCharacterId).toHaveBeenCalledWith('j');
+    expect(useBooksStore.getState().selectedCharacterId).toBe('j');
+    // The UI re-renders with the new character — observable outcome.
+    expect(screen.getByTestId('character-switcher')).toHaveTextContent('Jules');
+    expect(screen.getByTestId('character-context')).toHaveTextContent('Jules');
   });
 
-  it('character switcher prev button wraps around', async () => {
+  it('character-switcher prev button wraps from first to last character', async () => {
     const u = userEvent.setup();
     render(<VoiceEditor />);
     const switcher = screen.getByTestId('character-switcher');
     const btns = switcher.querySelectorAll('button');
     await u.click(btns[0]); // ◀ prev — wraps from index 0 to last
-    expect(mockSetSelectedCharacterId).toHaveBeenCalledWith('j');
+    expect(useBooksStore.getState().selectedCharacterId).toBe('j');
+    expect(screen.getByTestId('character-switcher')).toHaveTextContent('Jules');
   });
 
   it('shows "1 of 2" position in the switcher', () => {
@@ -288,7 +319,7 @@ describe('VoiceEditor (Design)', () => {
 
   it('shows "no character selected" message when character list is empty', () => {
     characterList = [];
-    storeState = { ...storeState, selectedCharacterId: null };
+    useBooksStore.getState().setSelectedCharacterId(null);
     render(<VoiceEditor />);
     expect(screen.getByText(/no character selected/i)).toBeInTheDocument();
   });
@@ -317,7 +348,7 @@ describe('VoiceEditor (Design)', () => {
     expect(screen.getByTestId('clone-dropzone')).toBeInTheDocument();
   });
 
-  it('preview-voice-btn passes design_prompt to preview mutate', async () => {
+  it('preview request carries the edited design_prompt as its payload', async () => {
     const u = userEvent.setup();
     render(<VoiceEditor />);
     // clear and type in new prompt
@@ -325,12 +356,9 @@ describe('VoiceEditor (Design)', () => {
     await u.clear(textarea);
     await u.type(textarea, 'gruff old man');
     await u.click(screen.getByTestId('preview-voice-btn'));
-    expect(previewMutate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        charId: 'm',
-        data: expect.objectContaining({ design_prompt: 'gruff old man' }),
-      }),
-    );
+    expect(lastPreviewPayload).not.toBeNull();
+    expect(lastPreviewPayload?.charId).toBe('m');
+    expect(lastPreviewPayload?.data.design_prompt).toBe('gruff old man');
   });
 
   it('renders "low" confidence badge when character confidence is 0.3', () => {
@@ -349,7 +377,7 @@ describe('VoiceEditor (Design)', () => {
         age_range: '30s',
       },
     ];
-    storeState = { ...storeState, selectedCharacterId: 'm' };
+    useBooksStore.getState().setSelectedCharacterId('m');
     render(<VoiceEditor />);
     const ctx = screen.getByTestId('character-context');
     expect(ctx).toHaveTextContent(/low/i);
@@ -372,21 +400,51 @@ describe('VoiceEditor (Design)', () => {
         age_range: '30s',
       },
     ];
-    storeState = { ...storeState, selectedCharacterId: 'm' };
+    useBooksStore.getState().setSelectedCharacterId('m');
     render(<VoiceEditor />);
     const ctx = screen.getByTestId('character-context');
     expect(ctx).toHaveTextContent(/medium/i);
     expect(ctx).toHaveTextContent(/confidence/i);
   });
 
-  it('assign-voice-btn navigates to overview via onSuccess callback', async () => {
+  it('assign-voice-btn navigates back to overview after a successful save', async () => {
     const u = userEvent.setup();
-    // Override updateMutate to immediately invoke onSuccess
-    updateMutate.mockImplementation((_vars: unknown, opts?: { onSuccess?: () => void }) => {
-      opts?.onSuccess?.();
-    });
+    updateOutcome = 'success';
     render(<VoiceEditor />);
     await u.click(screen.getByTestId('assign-voice-btn'));
-    expect(mockSetView).toHaveBeenCalledWith('overview');
+    expect(useBooksStore.getState().view).toBe('overview');
+  });
+
+  it('assign-voice-btn keeps the view on voice-editor while the save is pending', async () => {
+    const u = userEvent.setup();
+    updateOutcome = 'pending';
+    render(<VoiceEditor />);
+    await u.click(screen.getByTestId('assign-voice-btn'));
+    // No onSuccess was invoked → no navigation should have happened yet.
+    expect(useBooksStore.getState().view).toBe('voice-editor');
+    // But the request did cross the boundary with the right payload.
+    expect(lastUpdatePayload?.charId).toBe('m');
+  });
+
+  it('character-switcher cycles forward through both characters and back to the first', async () => {
+    const u = userEvent.setup();
+    render(<VoiceEditor />);
+    const nextBtn = screen.getByTestId('character-switcher').querySelectorAll('button')[1];
+    await u.click(nextBtn);
+    expect(useBooksStore.getState().selectedCharacterId).toBe('j');
+    await u.click(screen.getByTestId('character-switcher').querySelectorAll('button')[1]);
+    expect(useBooksStore.getState().selectedCharacterId).toBe('m');
+    expect(screen.getByTestId('character-context')).toHaveTextContent('Mira');
+  });
+
+  it('switching characters refreshes the design prompt to the new character description', async () => {
+    const u = userEvent.setup();
+    render(<VoiceEditor />);
+    const textareaBefore = screen.getByTestId('design-prompt') as HTMLTextAreaElement;
+    expect(textareaBefore.value).toBe('warm, resolute');
+    const nextBtn = screen.getByTestId('character-switcher').querySelectorAll('button')[1];
+    await u.click(nextBtn);
+    const textareaAfter = screen.getByTestId('design-prompt') as HTMLTextAreaElement;
+    expect(textareaAfter.value).toBe('deep, calm');
   });
 });
