@@ -1,20 +1,95 @@
 /// <reference types="@testing-library/jest-dom/vitest" />
 import '@/i18n';
+import { useState } from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
-import { ReferenceTranscript } from '@/components/VoiceProfiles/ReferenceTranscript';
+import { describe, expect, it } from 'vitest';
+import {
+  ReferenceTranscript,
+  type ReferenceTranscriptProps,
+} from '@/components/VoiceProfiles/ReferenceTranscript';
 
-const baseProps = {
+const noop = () => {};
+
+const baseProps: ReferenceTranscriptProps = {
   value: '',
-  onChange: vi.fn(),
-  status: 'idle' as const,
+  onChange: noop,
+  status: 'idle',
   isTranscribing: false,
   regeneratePrompt: false,
-  onRetranscribe: vi.fn(),
-  onAcceptRegenerate: vi.fn(),
-  onKeepEdits: vi.fn(),
+  onRetranscribe: noop,
+  onAcceptRegenerate: noop,
+  onKeepEdits: noop,
 };
+
+// ── Controlled host ────────────────────────────────────────────────────────────
+// A minimal stand-in for the parent that owns ReferenceTranscript's state. By
+// routing the callbacks through useState we can assert observable outcomes
+// (rendered text, banner visibility, retry counters) instead of inspecting
+// internal spy invocations. This mirrors how the real ProfileForm wires the
+// component up via useReferenceTranscript.
+interface HostProps {
+  initialValue?: string;
+  initialStatus?: ReferenceTranscriptProps['status'];
+  initialRegeneratePrompt?: boolean;
+  initialHasClip?: boolean;
+}
+
+function Host({
+  initialValue = '',
+  initialStatus = 'idle',
+  initialRegeneratePrompt = false,
+  initialHasClip = true,
+}: HostProps) {
+  const [value, setValue] = useState(initialValue);
+  const [status, setStatus] =
+    useState<ReferenceTranscriptProps['status']>(initialStatus);
+  const [isTranscribing, setIsTranscribing] = useState(
+    initialStatus === 'transcribing' || initialStatus === 'downloading',
+  );
+  const [regeneratePrompt, setRegeneratePrompt] = useState(initialRegeneratePrompt);
+  const [retryCount, setRetryCount] = useState(0);
+  // The "last decision" the host made in response to a regenerate prompt;
+  // surfaced as visible text so a test can assert the click triggered the
+  // documented behaviour without inspecting the spy directly.
+  const [regenerateDecision, setRegenerateDecision] = useState<'none' | 'accept' | 'keep'>(
+    'none',
+  );
+
+  return (
+    <div>
+      <ReferenceTranscript
+        value={value}
+        onChange={setValue}
+        status={status}
+        isTranscribing={isTranscribing}
+        regeneratePrompt={regeneratePrompt}
+        hasClip={initialHasClip}
+        onRetranscribe={() => {
+          // Simulate the parent's reaction: kick off transcription. The
+          // observable outcome is the transcribing indicator + the retry tally.
+          setRetryCount((n) => n + 1);
+          setStatus('transcribing');
+          setIsTranscribing(true);
+        }}
+        onAcceptRegenerate={() => {
+          // Accepting regenerate dismisses the banner and clears the user's
+          // edits so a fresh transcription can fill the box.
+          setRegeneratePrompt(false);
+          setRegenerateDecision('accept');
+          setValue('');
+        }}
+        onKeepEdits={() => {
+          // Keeping edits dismisses the banner without touching the text.
+          setRegeneratePrompt(false);
+          setRegenerateDecision('keep');
+        }}
+      />
+      <span data-testid="host-retry-count">{retryCount}</span>
+      <span data-testid="host-regenerate-decision">{regenerateDecision}</span>
+    </div>
+  );
+}
 
 describe('ReferenceTranscript', () => {
   it('shows the auto-filled hint and the text when filled (S1)', () => {
@@ -26,15 +101,18 @@ describe('ReferenceTranscript', () => {
   });
 
   it('shows the transcribing indicator, disables Re-transcribe, but keeps the input typeable (S2)', async () => {
-    render(
-      <ReferenceTranscript {...baseProps} status="transcribing" isTranscribing />,
-    );
+    render(<Host initialStatus="transcribing" />);
+
     expect(screen.getByTestId('transcript-transcribing')).toBeInTheDocument();
     expect(screen.getByTestId('transcript-retranscribe')).toBeDisabled();
-    const input = screen.getByTestId('transcript-input');
+
+    const input = screen.getByTestId('transcript-input') as HTMLTextAreaElement;
     expect(input).not.toBeDisabled();
-    await userEvent.type(input, 'x');
-    expect(baseProps.onChange).toHaveBeenCalled();
+
+    await userEvent.type(input, 'hello');
+    // Observable outcome: the textarea reflects what the user typed because
+    // the component forwarded each onChange into the parent's state.
+    expect(input).toHaveValue('hello');
   });
 
   it('shows an error note with an empty editable field and an enabled retry on failure (S4)', () => {
@@ -44,38 +122,60 @@ describe('ReferenceTranscript', () => {
     expect(screen.getByTestId('transcript-retranscribe')).not.toBeDisabled();
   });
 
-  it('invokes onRetranscribe when Re-transcribe is clicked (S7)', async () => {
-    const onRetranscribe = vi.fn();
-    render(
-      <ReferenceTranscript
-        {...baseProps}
-        status="filled"
-        value="words"
-        onRetranscribe={onRetranscribe}
-      />,
-    );
+  it('triggers a transcription run when Re-transcribe is clicked (S7)', async () => {
+    render(<Host initialStatus="filled" initialValue="words" />);
+
+    // Pre-click: idle from the host's perspective — no retries logged, no
+    // transcribing indicator.
+    expect(screen.getByTestId('host-retry-count')).toHaveTextContent('0');
+    expect(screen.queryByTestId('transcript-transcribing')).not.toBeInTheDocument();
+
     await userEvent.click(screen.getByTestId('transcript-retranscribe'));
-    expect(onRetranscribe).toHaveBeenCalledTimes(1);
+
+    // Observable outcome: the host advanced into the transcribing state and
+    // recorded exactly one retry — the click reached the parent's handler.
+    expect(screen.getByTestId('host-retry-count')).toHaveTextContent('1');
+    expect(screen.getByTestId('transcript-transcribing')).toBeInTheDocument();
+    expect(screen.getByTestId('transcript-retranscribe')).toBeDisabled();
   });
 
-  it('renders the regenerate banner and wires confirm/keep buttons', async () => {
-    const onAcceptRegenerate = vi.fn();
-    const onKeepEdits = vi.fn();
+  it('confirms regenerate clears edits and dismisses the banner', async () => {
     render(
-      <ReferenceTranscript
-        {...baseProps}
-        status="filled"
-        regeneratePrompt
-        value="edited"
-        onAcceptRegenerate={onAcceptRegenerate}
-        onKeepEdits={onKeepEdits}
+      <Host
+        initialStatus="filled"
+        initialRegeneratePrompt
+        initialValue="my hand edits"
       />,
     );
+
     expect(screen.getByTestId('transcript-regenerate-prompt')).toBeInTheDocument();
+    expect(screen.getByTestId('transcript-input')).toHaveValue('my hand edits');
+
     await userEvent.click(screen.getByTestId('transcript-regenerate-confirm'));
-    expect(onAcceptRegenerate).toHaveBeenCalledTimes(1);
+
+    // Observable outcome: banner is gone, edits cleared, host recorded "accept".
+    expect(screen.queryByTestId('transcript-regenerate-prompt')).not.toBeInTheDocument();
+    expect(screen.getByTestId('transcript-input')).toHaveValue('');
+    expect(screen.getByTestId('host-regenerate-decision')).toHaveTextContent('accept');
+  });
+
+  it('keeping edits dismisses the banner without touching the text', async () => {
+    render(
+      <Host
+        initialStatus="filled"
+        initialRegeneratePrompt
+        initialValue="my hand edits"
+      />,
+    );
+
+    expect(screen.getByTestId('transcript-regenerate-prompt')).toBeInTheDocument();
+
     await userEvent.click(screen.getByTestId('transcript-regenerate-keep'));
-    expect(onKeepEdits).toHaveBeenCalledTimes(1);
+
+    // Observable outcome: banner gone, text preserved, host recorded "keep".
+    expect(screen.queryByTestId('transcript-regenerate-prompt')).not.toBeInTheDocument();
+    expect(screen.getByTestId('transcript-input')).toHaveValue('my hand edits');
+    expect(screen.getByTestId('host-regenerate-decision')).toHaveTextContent('keep');
   });
 
   it('shows the model-download state with Re-transcribe disabled but the input still editable', () => {
