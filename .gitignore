@@ -49,6 +49,8 @@ logs/
 # Generated files
 app/openapi.json
 tauri/src-tauri/binaries/*
+# Audit stubs: keep zero-byte sidecar placeholders out of the tree
+tauri/src-tauri/binaries/voiceit-*-linux-gnu
 tauri/src-tauri/gen/Assets.car
 tauri/src-tauri/gen/voicebox.icns
 tauri/src-tauri/gen/partial.plist
