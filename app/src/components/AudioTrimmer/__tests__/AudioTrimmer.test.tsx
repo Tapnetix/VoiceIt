@@ -46,7 +46,7 @@ const mockWs = {
 
 // Minimal wavesurfer + regions mock — record handlers so tests can fire region updates.
 vi.mock('wavesurfer.js', () => {
-  const handlers: Record<string, ((...a: any[]) => void)[]> = {};
+  let handlers: Record<string, ((...a: any[]) => void)[]> = {};
   const fire = (event: string, ...args: any[]) => {
     for (const cb of handlers[event] ?? []) cb(...args);
   };
@@ -71,7 +71,11 @@ vi.mock('wavesurfer.js', () => {
     }),
     getCurrentTime: () => ws.currentTime,
     getDuration: () => 192,
-    destroy: vi.fn(),
+    destroy: vi.fn(() => {
+      // Clear handlers on destroy so handlers from a previous mount don't fire
+      // through the shared engine in a later test.
+      handlers = {};
+    }),
     seekTo: vi.fn(),
     load: vi.fn().mockResolvedValue(undefined),
     isPlaying: () => ws._playing,
@@ -81,6 +85,7 @@ vi.mock('wavesurfer.js', () => {
       create: vi.fn(() => {
         ws.currentTime = 0;
         ws._playing = false;
+        handlers = {};
         mockWs.instance = ws;
         mockWs.fire = fire;
         return ws;
@@ -254,4 +259,234 @@ describe('AudioTrimmer', () => {
     expect(screen.queryByTestId('trimmer-region')).not.toBeInTheDocument();
     expect(screen.getByTestId('trimmer-length-chip')).toHaveTextContent(/whole clip/i);
   });
+
+  it('S8: confirming a whole-clip emits the full buffer (no slice)', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(9));
+    let emitted: { file: File; dur: number } | null = null;
+    render(
+      <AudioTrimmer
+        file={makeFile('memo.m4a')}
+        onConfirm={(file, dur) => {
+          emitted = { file, dur };
+        }}
+      />,
+    );
+    await screen.findByTestId('trimmer-shortnote');
+    fireEvent.click(screen.getByRole('button', { name: /use this clip/i }));
+    expect(emitted).not.toBeNull();
+    expect(emitted!.file.type).toBe('audio/wav');
+    // Whole-clip duration matches the source buffer length, not a 15-45 window.
+    expect(emitted!.dur).toBe(9);
+  });
+
+  it('S9: decode failure falls back to whole-clip state', async () => {
+    (decodeAudioFile as any).mockRejectedValue(new Error('bad file'));
+    render(<AudioTrimmer file={makeFile('broken.wav')} onConfirm={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId('audio-trimmer')).toHaveAttribute('data-state', 'whole-clip'),
+    );
+  });
+
+  it('S10: in-range clip respects expandedByDefault=true', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(25));
+    render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} expandedByDefault />);
+    const root = await screen.findByTestId('audio-trimmer');
+    expect(root).toHaveAttribute('data-state', 'expanded');
+    expect(screen.getByTestId('trimmer-region')).toBeInTheDocument();
+  });
+
+  it('S11: rewind button moves the engine playhead back to the selection start', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
+    render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} />);
+    await screen.findByTestId('trimmer-region');
+
+    // Jump selection start to ~134s by clicking the track at 70%.
+    const track = screen.getByTestId('trimmer-waveform');
+    track.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 300, bottom: 80, width: 300, height: 80, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    fireEvent.click(track, { clientX: 210, clientY: 40 });
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/2:14/),
+    );
+
+    // Move the engine playhead somewhere else.
+    mockWs.instance!.setTime(50);
+    expect(mockWs.instance!.currentTime).toBe(50);
+
+    // Rewind snaps it back to the (new) region start, which is ~134.4s.
+    fireEvent.click(screen.getByTestId('trimmer-rewind'));
+    expect(mockWs.instance!.currentTime).toBeGreaterThan(133.4);
+    expect(mockWs.instance!.currentTime).toBeLessThan(135.4);
+  });
+
+  it('S12: loop toggle reflects in the play button accessible name', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
+    render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} />);
+    const loopBtn = await screen.findByTestId('trimmer-loop');
+    expect(loopBtn).toHaveAccessibleName(/loop selection/i);
+    fireEvent.click(loopBtn);
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-loop')).toHaveAccessibleName(/stop loop/i),
+    );
+    // Toggle back off.
+    fireEvent.click(screen.getByTestId('trimmer-loop'));
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-loop')).toHaveAccessibleName(/loop selection/i),
+    );
+  });
+
+  it('S13: playback past the region end pauses when not looping', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
+    render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} />);
+    await screen.findByTestId('trimmer-region');
+
+    // Start playing — engine flips to playing, transport shows Pause.
+    fireEvent.click(screen.getByTestId('trimmer-play'));
+    expect(mockWs.instance!.isPlaying()).toBe(true);
+
+    // Simulate the engine emitting a timeupdate that has passed the region end (default 0–20s).
+    mockWs.fire!('timeupdate', 25);
+
+    // Outcome: the engine is paused and the transport label is back to Play.
+    expect(mockWs.instance!.isPlaying()).toBe(false);
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-play')).toHaveAccessibleName(/play selection/i),
+    );
+  });
+
+  it('S14: when looping, playback past the region end seeks back to the start', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
+    render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} />);
+    await screen.findByTestId('trimmer-region');
+
+    // Turn loop on, then start playback.
+    fireEvent.click(screen.getByTestId('trimmer-loop'));
+    fireEvent.click(screen.getByTestId('trimmer-play'));
+    expect(mockWs.instance!.isPlaying()).toBe(true);
+    mockWs.instance!.setTime(10);
+
+    // Crossing the end while looping → seeks back to region.start (0) and stays playing.
+    mockWs.fire!('timeupdate', 25);
+    expect(mockWs.instance!.currentTime).toBe(0);
+    expect(mockWs.instance!.isPlaying()).toBe(true);
+  });
+
+  it('S15: ArrowRight / ArrowLeft / Home / End move the window with state-driven box', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
+    render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} />);
+    const track = await screen.findByTestId('trimmer-waveform');
+    track.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 300, bottom: 80, width: 300, height: 80, x: 0, y: 0, toJSON() {} }) as DOMRect;
+
+    // Default selection starts at 0:00 for a long source.
+    expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/0:00\s*–\s*0:20/);
+
+    // ArrowRight → start moves to 0:01.
+    fireEvent.keyDown(track, { key: 'ArrowRight' });
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/0:01\s*–\s*0:21/),
+    );
+
+    // Shift+ArrowRight → start moves 5s further.
+    fireEvent.keyDown(track, { key: 'ArrowRight', shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/0:06\s*–\s*0:26/),
+    );
+
+    // ArrowLeft → back by 1s.
+    fireEvent.keyDown(track, { key: 'ArrowLeft' });
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/0:05\s*–\s*0:25/),
+    );
+
+    // Home → clamp to the start.
+    fireEvent.keyDown(track, { key: 'Home' });
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/0:00\s*–\s*0:20/),
+    );
+
+    // End → clamp to the end (window slides to fit at the tail).
+    fireEvent.keyDown(track, { key: 'End' });
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/2:52\s*–\s*3:12/),
+    );
+
+    // Unknown key → no change.
+    fireEvent.keyDown(track, { key: 'Tab' });
+    expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/2:52\s*–\s*3:12/);
+  });
+
+  it('S16: dragging the region body moves the selection window', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
+    render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} />);
+    const track = await screen.findByTestId('trimmer-waveform');
+    track.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 300, bottom: 80, width: 300, height: 80, x: 0, y: 0, toJSON() {} }) as DOMRect;
+
+    const region = screen.getByTestId('trimmer-region');
+    // Pointer down on the body starts a "move" drag.
+    dispatchPointerOn(region, 'pointerdown', 0);
+    // Drag 75 px right → 0.25 * 192s = 48s. Window slides from 0–20 to 48–68.
+    dispatchPointer('pointermove', 75);
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/0:48\s*–\s*1:08/),
+    );
+    dispatchPointer('pointerup', 75);
+  });
+
+  it('S17: dragging the end handle resizes the window from its right edge', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
+    render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} />);
+    const track = await screen.findByTestId('trimmer-waveform');
+    track.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 300, bottom: 80, width: 300, height: 80, x: 0, y: 0, toJSON() {} }) as DOMRect;
+
+    const endHandle = screen.getByTestId('trimmer-handle-end');
+    dispatchPointerOn(endHandle, 'pointerdown', 0);
+    // Drag 25 px right → 0.0833 * 192 = 16s. End grows 20 + 16 → 36.
+    dispatchPointer('pointermove', 25);
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-length-chip')).toHaveTextContent(/36s/),
+    );
+    dispatchPointer('pointerup', 25);
+  });
+
+  it('S18: dragging the start handle resizes the window from its left edge', async () => {
+    (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
+    render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} />);
+    const track = await screen.findByTestId('trimmer-waveform');
+    track.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 300, bottom: 80, width: 300, height: 80, x: 0, y: 0, toJSON() {} }) as DOMRect;
+
+    // First, click to put the window at ~70% so we have room on the left to grow.
+    fireEvent.click(track, { clientX: 210, clientY: 40 });
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/2:14/),
+    );
+
+    const startHandle = screen.getByTestId('trimmer-handle-start');
+    dispatchPointerOn(startHandle, 'pointerdown', 0);
+    // Drag 15 px right → 0.05 * 192 ≈ 9.6s. Start grows from 134.4 by +9.6 → 144 ish,
+    // shrinking the window from 20s to ~10.4s, but clamped by WINDOW_MIN=15 → end-15.
+    dispatchPointer('pointermove', 15);
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-length-chip')).toHaveTextContent(/15s/),
+    );
+    dispatchPointer('pointerup', 15);
+  });
 });
+
+// React's synthetic PointerEvent in jsdom doesn't always carry clientX through
+// fireEvent helpers (jsdom lacks the PointerEvent constructor). Dispatch a real
+// MouseEvent — React's SyntheticEvent will see clientX, and our handler reads it.
+function dispatchPointerOn(el: HTMLElement, type: 'pointerdown', clientX: number) {
+  const ev = new MouseEvent(type, { bubbles: true, clientX });
+  el.dispatchEvent(ev);
+}
+
+// jsdom lacks PointerEvent; the component listens via addEventListener('pointermove', …)
+// on window. MouseEvent carries clientX natively, so dispatch one with the right type.
+function dispatchPointer(type: 'pointermove' | 'pointerup', clientX: number) {
+  const ev = new MouseEvent(type, { bubbles: true, clientX });
+  window.dispatchEvent(ev);
+}
