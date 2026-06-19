@@ -2,15 +2,19 @@
  * BookOverviewCast — focused interaction tests for merge/delete wiring.
  *
  * Renders C8's BookOverview with a fixture that has 1 narrator + 2 non-narrator
- * characters that represent the "same person" (Mira / Mira the woman). Asserts that:
+ * characters that represent the "same person" (Mira / Mira the woman). Asserts
+ * observable outcomes:
  *   - Selecting 2 non-narrator checkboxes enables the merge-btn
- *   - Clicking merge-btn calls useMergeCharacter.mutateAsync with the correct
- *     { bookId, charId (survivor), data: { source_char_id } } payload
+ *   - Clicking merge-btn sends a merge payload with survivor=first selected,
+ *     source=second selected, then clears the selection (checkboxes uncheck,
+ *     merge-btn returns to disabled).
  *   - Selecting 1 non-narrator checkbox enables the delete-btn
- *   - Clicking delete-btn opens a confirm dialog; confirming calls
- *     useDeleteCharacter.mutateAsync with { bookId, charId }
+ *   - Clicking delete-btn opens a confirm dialog (DOM); confirming sends a
+ *     delete payload, closes the dialog, and clears the selection.
  *
  * C8 wiring lives in BookOverview.tsx — this test only asserts it.
+ * Payload checks read mock.calls[0][0] (the value crossing the boundary)
+ * rather than asserting on spy call counts, per the test quality bar.
  */
 /// <reference types="@testing-library/jest-dom/vitest" />
 import '@/i18n';
@@ -146,15 +150,29 @@ describe('BookOverview cast management', () => {
 
     await u.click(mergeBtn);
 
-    // useMergeCharacter.mutateAsync must be called with survivor=m1, source=m2
+    // Outcome 1 — the boundary payload sent for merge identifies survivor=m1, source=m2.
+    // We read the captured value rather than asserting "was the spy called", because the
+    // observable outcome is the payload that crosses the API boundary.
     await waitFor(() => {
-      expect(mergeMutate).toHaveBeenCalledTimes(1);
-      expect(mergeMutate).toHaveBeenCalledWith({
-        bookId: 'b1',
-        charId: 'm1',
-        data: { source_char_id: 'm2' },
-      });
+      expect(mergeMutate.mock.calls.length).toBeGreaterThan(0);
     });
+    const mergePayload = mergeMutate.mock.calls[0][0];
+    expect(mergePayload).toEqual({
+      bookId: 'b1',
+      charId: 'm1',
+      data: { source_char_id: 'm2' },
+    });
+
+    // Outcome 2 — after a successful merge the selection is cleared, so the
+    // merge-btn returns to its disabled state (selectedCharIds.size < 2) and
+    // the previously checked boxes become unchecked.
+    await waitFor(() => {
+      expect(screen.getByTestId('merge-btn')).toBeDisabled();
+    });
+    const checkboxesAfter = within(screen.getByTestId('cast-roster')).getAllByRole('checkbox');
+    for (const cb of checkboxesAfter) {
+      expect(cb).not.toBeChecked();
+    }
   });
 
   it('delete-btn is disabled when no character is selected', () => {
@@ -172,7 +190,7 @@ describe('BookOverview cast management', () => {
     expect(screen.getByTestId('merge-btn')).toBeDisabled();
   });
 
-  it('delete-btn opens confirm dialog and calls useDeleteCharacter on confirm', async () => {
+  it('delete-btn opens confirm dialog and deletes the selected character on confirm', async () => {
     render(wrap(<BookOverview />));
     const roster = screen.getByTestId('cast-roster');
     const [first] = within(roster).getAllByRole('checkbox');
@@ -182,20 +200,35 @@ describe('BookOverview cast management', () => {
     expect(deleteBtn).not.toBeDisabled();
     fireEvent.click(deleteBtn);
 
-    // The confirm dialog should appear
-    await screen.findByRole('alertdialog');
+    // Outcome 1 — clicking delete opens the confirm dialog (observable DOM state).
+    const dialog = await screen.findByRole('alertdialog');
 
     // Click the confirm action inside the dialog
-    const dialog = screen.getByRole('alertdialog');
     const confirmBtn = within(dialog).getByRole('button', { name: /delete|confirm/i });
     fireEvent.click(confirmBtn);
 
+    // Outcome 2 — the boundary payload identifies the character to delete.
+    // Read the captured value rather than asserting on spy call counts.
     await waitFor(() => {
-      expect(deleteMutate).toHaveBeenCalledTimes(1);
-      expect(deleteMutate).toHaveBeenCalledWith({
-        bookId: 'b1',
-        charId: 'm1',
-      });
+      expect(deleteMutate.mock.calls.length).toBeGreaterThan(0);
     });
+    const deletePayload = deleteMutate.mock.calls[0][0];
+    expect(deletePayload).toEqual({
+      bookId: 'b1',
+      charId: 'm1',
+    });
+
+    // Outcome 3 — after a successful delete the confirm dialog closes and the
+    // selection is cleared, so the delete-btn returns to disabled state.
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('delete-btn')).toBeDisabled();
+    });
+    const checkboxesAfter = within(screen.getByTestId('cast-roster')).getAllByRole('checkbox');
+    for (const cb of checkboxesAfter) {
+      expect(cb).not.toBeChecked();
+    }
   });
 });
