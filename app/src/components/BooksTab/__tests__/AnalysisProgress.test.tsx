@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { act } from 'react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { AnalysisProgress } from '@/components/BooksTab/AnalysisProgress';
+import { useBooksStore } from '@/stores/booksStore';
 
 let handlers: any;
 
@@ -15,11 +16,6 @@ vi.mock('@/lib/hooks/useBooks', () => ({
   useBook: () => ({ data: { status: 'analyzing' } }),
 }));
 
-const mockSetView = vi.fn();
-vi.mock('@/stores/booksStore', () => ({
-  useBooksStore: (sel: any) => sel({ selectedBookId: 'b1', setView: mockSetView }),
-}));
-
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({ invalidateQueries: vi.fn() }),
 }));
@@ -27,7 +23,9 @@ vi.mock('@tanstack/react-query', () => ({
 describe('AnalysisProgress', () => {
   beforeEach(() => {
     handlers = undefined;
-    mockSetView.mockClear();
+    useBooksStore.getState().reset();
+    useBooksStore.getState().setSelectedBookId('b1');
+    useBooksStore.getState().setView('analysis');
   });
 
   it('streams stage progress and appends detected characters before completion', () => {
@@ -145,8 +143,9 @@ describe('AnalysisProgress', () => {
     expect(live).toHaveTextContent('medium');
   });
 
-  it('calls setView("overview") on analysis_complete', () => {
+  it('transitions to the overview view when analysis completes', () => {
     render(<AnalysisProgress />);
+    expect(useBooksStore.getState().view).toBe('analysis');
     act(() => {
       handlers.onAnalysisComplete?.({
         type: 'analysis_complete',
@@ -154,7 +153,7 @@ describe('AnalysisProgress', () => {
         chapter_count: 10,
       });
     });
-    expect(mockSetView).toHaveBeenCalledWith('overview');
+    expect(useBooksStore.getState().view).toBe('overview');
   });
 
   it('shows error message inline on error event', () => {
