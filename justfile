@@ -297,7 +297,7 @@ test: _ensure-venv
 
 # Run Python tests with coverage on the audiobook backend modules
 test-coverage: _ensure-venv
-    {{ venv_bin }}/python -m pytest {{ backend_dir }}/tests --cov=backend --cov-report=term
+    {{ venv_bin }}/python -m pytest {{ backend_dir }}/tests --cov=backend --cov-config={{ backend_dir }}/pyproject.toml --cov-report=term
 
 # Run the Playwright browser E2E suite against the web build
 test-e2e:
