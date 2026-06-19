@@ -24,12 +24,20 @@ vi.mock('@/lib/utils/audio', async (importOriginal) => {
 
 // Shared container so the vi.mock factory (which is hoisted) can write the instance
 // and tests (which run later) can read it. Using an object avoids the TDZ issue.
+//
+// The mocked WaveSurfer behaves like a tiny audio engine: setTime advances a
+// tracked playhead, play/pause emit the matching events so the component's
+// `isPlaying` state reflects engine state. Tests can then assert on *observable
+// outcomes* — the playhead value, the rendered Play/Pause icon, and the
+// selection text — rather than spying on individual method calls.
 const mockWs = {
   instance: null as null | {
     play: ReturnType<typeof vi.fn>;
     setTime: ReturnType<typeof vi.fn>;
     pause: ReturnType<typeof vi.fn>;
     seekTo: ReturnType<typeof vi.fn>;
+    currentTime: number;
+    isPlaying: () => boolean;
     [key: string]: any;
   },
   // Invoke recorded wavesurfer event handlers (e.g. 'interaction') from tests.
@@ -39,24 +47,42 @@ const mockWs = {
 // Minimal wavesurfer + regions mock — record handlers so tests can fire region updates.
 vi.mock('wavesurfer.js', () => {
   const handlers: Record<string, ((...a: any[]) => void)[]> = {};
-  const ws = {
+  const fire = (event: string, ...args: any[]) => {
+    for (const cb of handlers[event] ?? []) cb(...args);
+  };
+  const ws: any = {
     registerPlugin: (p: any) => p,
     on: (e: string, cb: any) => {
       handlers[e] = handlers[e] ?? [];
       handlers[e].push(cb);
     },
-    play: vi.fn(), pause: vi.fn(), setTime: vi.fn(), getCurrentTime: () => 0,
-    getDuration: () => 192, destroy: vi.fn(), seekTo: vi.fn(),
+    currentTime: 0,
+    _playing: false,
+    play: vi.fn(function (this: any) {
+      ws._playing = true;
+      fire('play');
+    }),
+    pause: vi.fn(function (this: any) {
+      ws._playing = false;
+      fire('pause');
+    }),
+    setTime: vi.fn(function (this: any, t: number) {
+      ws.currentTime = t;
+    }),
+    getCurrentTime: () => ws.currentTime,
+    getDuration: () => 192,
+    destroy: vi.fn(),
+    seekTo: vi.fn(),
     load: vi.fn().mockResolvedValue(undefined),
-    isPlaying: vi.fn(() => false),
+    isPlaying: () => ws._playing,
   };
   return {
     default: {
       create: vi.fn(() => {
+        ws.currentTime = 0;
+        ws._playing = false;
         mockWs.instance = ws;
-        mockWs.fire = (event: string, ...args: any[]) => {
-          for (const cb of handlers[event] ?? []) cb(...args);
-        };
+        mockWs.fire = fire;
         return ws;
       }),
     },
@@ -121,18 +147,30 @@ describe('AudioTrimmer', () => {
   it('S4: play scopes audition to the region (defaults to start; auto-suggest jumps to the energy window)', async () => {
     (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
     render(<AudioTrimmer file={makeFile()} onConfirm={vi.fn()} />);
-    await screen.findByTestId('trimmer-play');
-    mockWs.instance!.setTime.mockClear();
-    mockWs.instance!.play.mockClear();
-    // Long source now anchors the window at the START of the clip → play seeks to 0.
-    fireEvent.click(screen.getByTestId('trimmer-play'));
-    expect(mockWs.instance!.setTime).toHaveBeenCalledWith(0);
-    expect(mockWs.instance!.play).toHaveBeenCalled();
-    // Auto-suggest opt-in jumps the window to the highest-energy span (mock start=42).
-    mockWs.instance!.setTime.mockClear();
+    const playBtn = await screen.findByTestId('trimmer-play');
+    // Long source anchors the window at the START of the clip → selection reads 0:00–0:20.
+    expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/0:00\s*–\s*0:20/);
+    // Outcome: pressing Play moves the engine playhead to the region start (0s)
+    // and the transport flips into the "playing" UI (Pause icon, "Pause" aria-label).
+    fireEvent.click(playBtn);
+    expect(mockWs.instance!.currentTime).toBe(0);
+    expect(mockWs.instance!.isPlaying()).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-play')).toHaveAccessibleName(/pause/i),
+    );
+
+    // Auto-suggest opt-in jumps the window to the highest-energy span
+    // (mocked suggestWindow returns start=42). The observable outcome is
+    // the visible selection text shifting to start at 0:42.
     fireEvent.click(screen.getByTestId('trimmer-autosuggest'));
-    fireEvent.click(screen.getByTestId('trimmer-play'));
-    expect(mockWs.instance!.setTime).toHaveBeenCalledWith(42);
+    await waitFor(() =>
+      expect(screen.getByTestId('trimmer-selection')).toHaveTextContent(/0:42\s*–\s*1:02/),
+    );
+    // And re-pressing Play (toggle pause → play) re-scopes the engine to the new start (42s).
+    fireEvent.click(screen.getByTestId('trimmer-play')); // pause
+    fireEvent.click(screen.getByTestId('trimmer-play')); // play from new region start
+    expect(mockWs.instance!.currentTime).toBe(42);
+    expect(mockWs.instance!.isPlaying()).toBe(true);
   });
 
   it('S4b: clicking the waveform moves the selection window to start at the clicked time', async () => {
@@ -152,10 +190,12 @@ describe('AudioTrimmer', () => {
     const left = parseFloat((box as HTMLElement).style.left);
     expect(left).toBeGreaterThan(65);
     expect(left).toBeLessThan(75);
-    // Play auditions from the (new) window start.
-    mockWs.instance!.setTime.mockClear();
+    // Outcome of Play after the click: engine playhead is scoped to the new window's
+    // start (~134.4s) and the transport is in the "playing" state.
     fireEvent.click(screen.getByTestId('trimmer-play'));
-    expect(mockWs.instance!.setTime).toHaveBeenCalledWith(expect.closeTo(134.4, 1));
+    expect(mockWs.instance!.currentTime).toBeGreaterThan(133.4);
+    expect(mockWs.instance!.currentTime).toBeLessThan(135.4);
+    expect(mockWs.instance!.isPlaying()).toBe(true);
   });
 
   it('exposes the current selection via the getClip imperative handle', async () => {
@@ -185,12 +225,22 @@ describe('AudioTrimmer', () => {
 
   it('S6: confirm sends only the sliced span', async () => {
     (decodeAudioFile as any).mockResolvedValue(fakeBuffer(192));
-    const onConfirm = vi.fn();
+    // Capture the emitted clip directly so we can assert on its shape rather
+    // than on call-count metadata.
+    let emitted: { file: File; dur: number } | null = null;
+    const onConfirm = (file: File, dur: number) => {
+      emitted = { file, dur };
+    };
     render(<AudioTrimmer file={makeFile()} onConfirm={onConfirm} />);
     await screen.findByTestId('audio-trimmer');
     fireEvent.click(screen.getByRole('button', { name: /use this clip/i }));
-    expect(onConfirm).toHaveBeenCalledWith(expect.any(File), expect.any(Number));
-    const [, dur] = onConfirm.mock.calls[0];
+    // Outcome: confirm produced a wav File of the selected slice, with a duration
+    // inside the allowed window range.
+    expect(emitted).not.toBeNull();
+    expect(emitted!.file).toBeInstanceOf(File);
+    expect(emitted!.file.type).toBe('audio/wav');
+    expect(emitted!.file.name).toMatch(/reference-\d+\.wav/);
+    const dur = emitted!.dur;
     expect(dur).toBeGreaterThanOrEqual(15);
     expect(dur).toBeLessThanOrEqual(45);
   });
