@@ -25,6 +25,49 @@ describe('booksStore', () => {
     expect(s.currentSpokenSegmentId).toBe('seg-12');
   });
 
+  it('selects a chapter independently of the book selection', () => {
+    useBooksStore.getState().setSelectedChapterId('ch-7');
+    expect(useBooksStore.getState().selectedChapterId).toBe('ch-7');
+    useBooksStore.getState().setSelectedChapterId(null);
+    expect(useBooksStore.getState().selectedChapterId).toBeNull();
+  });
+
+  it('selects a segment independently of chapter and book selection', () => {
+    useBooksStore.getState().setSelectedSegmentId('seg-42');
+    expect(useBooksStore.getState().selectedSegmentId).toBe('seg-42');
+    useBooksStore.getState().setSelectedSegmentId(null);
+    expect(useBooksStore.getState().selectedSegmentId).toBeNull();
+  });
+
+  it('selects a character independently of other selections', () => {
+    useBooksStore.getState().setSelectedCharacterId('char-narrator');
+    expect(useBooksStore.getState().selectedCharacterId).toBe('char-narrator');
+    useBooksStore.getState().setSelectedCharacterId(null);
+    expect(useBooksStore.getState().selectedCharacterId).toBeNull();
+  });
+
+  it('reset clears chapter, segment, character ids and read-along state', () => {
+    const s = useBooksStore.getState();
+    s.setSelectedBookId('b1');
+    s.setSelectedChapterId('ch-1');
+    s.setSelectedSegmentId('seg-1');
+    s.setSelectedCharacterId('char-1');
+    s.setReadAlong(true);
+    s.setCurrentSpokenSegment('seg-now');
+    s.setView('voice-editor');
+
+    useBooksStore.getState().reset();
+
+    const after = useBooksStore.getState();
+    expect(after.view).toBe('library');
+    expect(after.selectedBookId).toBeNull();
+    expect(after.selectedChapterId).toBeNull();
+    expect(after.selectedSegmentId).toBeNull();
+    expect(after.selectedCharacterId).toBeNull();
+    expect(after.readAlongPlaying).toBe(false);
+    expect(after.currentSpokenSegmentId).toBeNull();
+  });
+
   it('reset returns to the library with cleared selection', () => {
     useBooksStore.getState().setSelectedBookId('b1');
     useBooksStore.getState().setView('chapter-editor');
