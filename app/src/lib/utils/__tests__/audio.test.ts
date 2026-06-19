@@ -11,6 +11,7 @@ import {
   sliceToWav,
   classifyWindowLength,
   audioBufferToWav,
+  convertToWav,
   createAudioUrl,
   downloadAudio,
   formatAudioDuration,
@@ -272,5 +273,250 @@ describe('getAudioDuration', () => {
 
     await expect(getAudioDuration(file)).resolves.toBe(3.5);
     vi.unstubAllGlobals();
+  });
+
+  it('falls back to HTMLMediaElement.duration when decodeAudioData throws', async () => {
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        async decodeAudioData(): Promise<AudioBuffer> {
+          throw new Error('cannot decode');
+        }
+        async close() {}
+      },
+    );
+    const createdUrls: string[] = [];
+    const revokedUrls: string[] = [];
+    vi.stubGlobal('URL', {
+      createObjectURL: (_b: Blob) => {
+        const u = `blob:fallback-${createdUrls.length}`;
+        createdUrls.push(u);
+        return u;
+      },
+      revokeObjectURL: (u: string) => {
+        revokedUrls.push(u);
+      },
+    });
+    vi.stubGlobal(
+      'Audio',
+      class {
+        duration = 4.2;
+        private listeners: Record<string, Array<() => void>> = {};
+        constructor() {
+          Object.defineProperty(this, 'src', {
+            configurable: true,
+            set: (_v: string) => {
+              queueMicrotask(() => {
+                for (const cb of this.listeners.loadedmetadata ?? []) cb();
+              });
+            },
+            get: () => '',
+          });
+        }
+        addEventListener(event: string, cb: () => void) {
+          (this.listeners[event] ||= []).push(cb);
+        }
+      },
+    );
+
+    const file = { arrayBuffer: async () => new ArrayBuffer(2) } as unknown as File;
+    await expect(getAudioDuration(file)).resolves.toBe(4.2);
+    expect(createdUrls.length).toBeGreaterThan(0);
+    expect(revokedUrls).toEqual(createdUrls);
+
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects when the HTMLMediaElement fallback reports invalid duration', async () => {
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        async decodeAudioData(): Promise<AudioBuffer> {
+          throw new Error('cannot decode');
+        }
+        async close() {}
+      },
+    );
+    vi.stubGlobal('URL', {
+      createObjectURL: () => 'blob:bad',
+      revokeObjectURL: () => {},
+    });
+    vi.stubGlobal(
+      'Audio',
+      class {
+        duration = Number.NaN;
+        private listeners: Record<string, Array<() => void>> = {};
+        constructor() {
+          Object.defineProperty(this, 'src', {
+            configurable: true,
+            set: (_v: string) => {
+              queueMicrotask(() => {
+                for (const cb of this.listeners.loadedmetadata ?? []) cb();
+              });
+            },
+            get: () => '',
+          });
+        }
+        addEventListener(event: string, cb: () => void) {
+          (this.listeners[event] ||= []).push(cb);
+        }
+      },
+    );
+
+    const file = { arrayBuffer: async () => new ArrayBuffer(2) } as unknown as File;
+    await expect(getAudioDuration(file)).rejects.toThrow(/invalid duration/);
+
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects when the HTMLMediaElement fallback emits an error event', async () => {
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        async decodeAudioData(): Promise<AudioBuffer> {
+          throw new Error('cannot decode');
+        }
+        async close() {}
+      },
+    );
+    vi.stubGlobal('URL', {
+      createObjectURL: () => 'blob:err',
+      revokeObjectURL: () => {},
+    });
+    vi.stubGlobal(
+      'Audio',
+      class {
+        duration = 0;
+        private listeners: Record<string, Array<() => void>> = {};
+        constructor() {
+          Object.defineProperty(this, 'src', {
+            configurable: true,
+            set: (_v: string) => {
+              queueMicrotask(() => {
+                for (const cb of this.listeners.error ?? []) cb();
+              });
+            },
+            get: () => '',
+          });
+        }
+        addEventListener(event: string, cb: () => void) {
+          (this.listeners[event] ||= []).push(cb);
+        }
+      },
+    );
+
+    const file = { arrayBuffer: async () => new ArrayBuffer(2) } as unknown as File;
+    await expect(getAudioDuration(file)).rejects.toThrow(/Failed to load audio file/);
+
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('convertToWav', () => {
+  it('returns a WAV blob produced by decoding the input and re-encoding the AudioBuffer', async () => {
+    const sr = 24000;
+    const samples = new Float32Array(sr).fill(0.25); // 1s mono
+    const decoded = fakeBuffer(samples, sr);
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        async decodeAudioData() {
+          return decoded;
+        }
+        async close() {}
+      },
+    );
+    // jsdom's Blob lacks .arrayBuffer(); pass a Blob-shaped fake so the
+    // production code path is exercised end-to-end without touching jsdom internals.
+    const input = {
+      arrayBuffer: async () => new ArrayBuffer(4),
+      type: 'audio/webm',
+      size: 4,
+    } as unknown as Blob;
+
+    const wav = await convertToWav(input);
+
+    expect(wav.type).toBe('audio/wav');
+    // Verify RIFF/WAVE header bytes — proves the bytes came from audioBufferToWav.
+    const ab = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(wav);
+    });
+    const head = new TextDecoder().decode(ab.slice(0, 4));
+    const wave = new TextDecoder().decode(ab.slice(8, 12));
+    expect(head).toBe('RIFF');
+    expect(wave).toBe('WAVE');
+    // 1s mono 16-bit @24k payload = 24000*2 bytes + 44 header.
+    expect(wav.size).toBe(44 + sr * 2);
+    vi.unstubAllGlobals();
+  });
+
+  it('propagates the AudioContext.decodeAudioData rejection', async () => {
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        async decodeAudioData(): Promise<AudioBuffer> {
+          throw new Error('decode failed');
+        }
+        async close() {}
+      },
+    );
+    const input = {
+      arrayBuffer: async () => new ArrayBuffer(1),
+      type: 'audio/webm',
+      size: 1,
+    } as unknown as Blob;
+    await expect(convertToWav(input)).rejects.toThrow('decode failed');
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('audioBufferToWav header values', () => {
+  it('encodes channel count, sample rate, and byte-rate in the WAV header', async () => {
+    const sr = 16000;
+    const left = new Float32Array(sr).fill(0.1);
+    const right = new Float32Array(sr).fill(-0.1);
+    const buf: AudioBuffer = {
+      numberOfChannels: 2,
+      sampleRate: sr,
+      length: sr,
+      duration: 1,
+      getChannelData: (c: number) => (c === 0 ? left : right),
+    } as unknown as AudioBuffer;
+
+    const blob = audioBufferToWav(buf);
+    const ab = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(blob);
+    });
+    const view = new DataView(ab);
+    expect(view.getUint16(22, true)).toBe(2); // numberOfChannels
+    expect(view.getUint32(24, true)).toBe(sr); // sampleRate
+    expect(view.getUint32(28, true)).toBe(sr * 2 * 2); // byteRate = sr * channels * bytes/sample
+    expect(view.getUint16(34, true)).toBe(16); // bitDepth
+    // data chunk size = samples * channels * 2 bytes
+    expect(view.getUint32(40, true)).toBe(sr * 2 * 2);
+  });
+});
+
+describe('suggestWindow boundary handling', () => {
+  it('clamps to end at duration when the picked window would overshoot the buffer', () => {
+    // Buffer of 30.5s where the loud band sits at the very end.
+    // The 20s window starting near the last possible frame would push end past duration.
+    const sr = 24000;
+    const total = Math.floor(30.5 * sr);
+    const s = new Float32Array(total);
+    // Loud only in the final 5s — forces the algorithm to pick a start near the end.
+    for (let i = total - 5 * sr; i < total; i++) s[i] = 0.9;
+    const buf = fakeBuffer(s, sr);
+
+    const { start, end } = suggestWindow(buf, 20);
+    expect(end).toBeLessThanOrEqual(buf.duration + 1e-6);
+    expect(end - start).toBeCloseTo(20, 1);
+    expect(start).toBeGreaterThanOrEqual(0);
   });
 });
