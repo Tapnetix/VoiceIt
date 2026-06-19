@@ -11,6 +11,10 @@ import {
   sliceToWav,
   classifyWindowLength,
   audioBufferToWav,
+  createAudioUrl,
+  downloadAudio,
+  formatAudioDuration,
+  getAudioDuration,
 } from '../audio';
 
 // Minimal AudioBuffer stand-in. getChannelData returns the backing Float32Array.
@@ -108,24 +112,165 @@ describe('audioBufferToWav (now exported)', () => {
 });
 
 describe('decodeAudioFile', () => {
-  it('decodes the file via AudioContext and closes the context', async () => {
+  it('returns the decoded AudioBuffer for the file bytes', async () => {
     const fake = { numberOfChannels: 1, sampleRate: 24000, length: 3, duration: 3 / 24000 } as unknown as AudioBuffer;
-    const decodeAudioData = vi.fn().mockResolvedValue(fake);
-    const close = vi.fn().mockResolvedValue(undefined);
+    const decodedFor = new Map<ArrayBuffer, AudioBuffer>();
+    const bytes = new ArrayBuffer(8);
+    decodedFor.set(bytes, fake);
     vi.stubGlobal(
       'AudioContext',
       class {
-        decodeAudioData = decodeAudioData;
-        close = close;
+        closed = false;
+        async decodeAudioData(ab: ArrayBuffer) {
+          return decodedFor.get(ab)!;
+        }
+        async close() {
+          this.closed = true;
+        }
       },
     );
-    const file = { arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)) } as unknown as File;
+    const file = { arrayBuffer: async () => bytes } as unknown as File;
 
     const result = await decodeAudioFile(file);
 
     expect(result).toBe(fake);
-    expect(decodeAudioData).toHaveBeenCalledTimes(1);
-    expect(close).toHaveBeenCalledTimes(1); // closed in finally
+    vi.unstubAllGlobals();
+  });
+
+  it('releases the AudioContext even when decoding throws', async () => {
+    const closedContexts: boolean[] = [];
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        constructor() {
+          closedContexts.push(false);
+        }
+        async decodeAudioData(): Promise<AudioBuffer> {
+          throw new Error('bad bytes');
+        }
+        async close() {
+          closedContexts[closedContexts.length - 1] = true;
+        }
+      },
+    );
+    const file = { arrayBuffer: async () => new ArrayBuffer(4) } as unknown as File;
+
+    await expect(decodeAudioFile(file)).rejects.toThrow('bad bytes');
+    expect(closedContexts).toEqual([true]);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('createAudioUrl', () => {
+  it('joins the server URL and audio id at /audio/<id>', () => {
+    expect(createAudioUrl('abc-123', 'http://localhost:8000')).toBe(
+      'http://localhost:8000/audio/abc-123',
+    );
+  });
+});
+
+describe('formatAudioDuration', () => {
+  it('renders seconds as M:SS with zero-padded seconds', () => {
+    expect(formatAudioDuration(0)).toBe('0:00');
+    expect(formatAudioDuration(5)).toBe('0:05');
+    expect(formatAudioDuration(65)).toBe('1:05');
+    expect(formatAudioDuration(125.9)).toBe('2:05'); // floors seconds
+    expect(formatAudioDuration(3600)).toBe('60:00');
+  });
+});
+
+describe('downloadAudio', () => {
+  it('attaches and detaches the download link cleanly (no DOM residue)', () => {
+    const wav = 'blob:fake-url';
+    const filename = 'chapter-1.wav';
+    const before = document.body.childNodes.length;
+
+    // Suppress jsdom's "Not implemented: navigation" by intercepting click on
+    // any anchor created during this call.
+    const realCreate = document.createElement.bind(document);
+    const spy = vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      const el = realCreate(tag) as HTMLAnchorElement;
+      if (tag === 'a') el.click = () => {};
+      return el;
+    });
+
+    downloadAudio(wav, filename);
+    spy.mockRestore();
+
+    expect(document.body.childNodes.length).toBe(before);
+    expect(document.querySelectorAll(`a[href="${wav}"]`).length).toBe(0);
+  });
+
+  it('configures the anchor href and download attributes from its arguments', () => {
+    const wav = 'blob:capture-url';
+    const filename = 'sample.wav';
+    let captured: { href: string; download: string } | null = null;
+
+    const realCreate = document.createElement.bind(document);
+    const spy = vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      const el = realCreate(tag) as HTMLAnchorElement;
+      if (tag === 'a') {
+        // Capture the values set by downloadAudio. Replace click with a no-op
+        // so jsdom does not warn about navigation.
+        el.click = () => {
+          captured = { href: el.href, download: el.download };
+        };
+      }
+      return el;
+    });
+
+    downloadAudio(wav, filename);
+    spy.mockRestore();
+
+    expect(captured).not.toBeNull();
+    expect(captured!.href).toContain(wav);
+    expect(captured!.download).toBe(filename);
+  });
+});
+
+describe('getAudioDuration', () => {
+  it('returns the recordedDuration shortcut when set', async () => {
+    const file = Object.assign(new Blob(['x']), { name: 'rec.webm' }) as unknown as File & {
+      recordedDuration?: number;
+    };
+    file.recordedDuration = 12.5;
+    await expect(getAudioDuration(file)).resolves.toBe(12.5);
+  });
+
+  it('ignores non-finite recordedDuration and falls through to decoding', async () => {
+    const decoded = { duration: 7.25 } as AudioBuffer;
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        async decodeAudioData() {
+          return decoded;
+        }
+        async close() {}
+      },
+    );
+    const file = Object.assign(
+      { arrayBuffer: async () => new ArrayBuffer(2) } as unknown as File,
+      { recordedDuration: Number.NaN },
+    ) as File & { recordedDuration?: number };
+
+    await expect(getAudioDuration(file)).resolves.toBe(7.25);
+    vi.unstubAllGlobals();
+  });
+
+  it('returns the decoded AudioBuffer duration for files without a recordedDuration', async () => {
+    const decoded = { duration: 3.5 } as AudioBuffer;
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        async decodeAudioData() {
+          return decoded;
+        }
+        async close() {}
+      },
+    );
+    const file = { arrayBuffer: async () => new ArrayBuffer(8) } as unknown as File;
+
+    await expect(getAudioDuration(file)).resolves.toBe(3.5);
     vi.unstubAllGlobals();
   });
 });

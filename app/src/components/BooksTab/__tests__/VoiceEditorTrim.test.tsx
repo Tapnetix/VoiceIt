@@ -122,8 +122,19 @@ describe('VoiceEditor Clone tab — AudioTrimmer integration', () => {
     expect(screen.getByTestId('create-clone-btn')).toBeDisabled();
   });
 
-  it('passes the trimmed file to cloneVoice.mutateAsync, not the raw file', async () => {
+  it('reveals the assign/preview controls only after the user confirms a trim and creates the clone', async () => {
     const u = userEvent.setup();
+    // The clone-create path only resolves for the trimmed file; if the raw file
+    // were sent instead, the success branch (which renders assign/preview) would
+    // never run and the test would fail on the assertion below.
+    const trimmedFile = new File([new Uint8Array(4)], 'reference-123.wav', { type: 'audio/wav' });
+    createClone.mockImplementation(async (args: { file: File }) => {
+      if (args.file !== trimmedFile) {
+        throw new Error('expected the trimmed file, got the raw upload');
+      }
+      return { id: 'cloned-1', name: 'Mira (cloned)' };
+    });
+
     render(<VoiceEditor initialTab="clone" />);
 
     const input = screen.getByTestId('clone-dropzone').querySelector('input[type=file]')!;
@@ -132,22 +143,27 @@ describe('VoiceEditor Clone tab — AudioTrimmer integration', () => {
       new File([new Uint8Array(16)], 'raw.wav', { type: 'audio/wav' }),
     );
 
-    // AudioTrimmer is mounted; confirm with a trimmed file
-    const trimmedFile = new File([new Uint8Array(4)], 'reference-123.wav', { type: 'audio/wav' });
+    // Before confirming a trim, Create is disabled and the post-clone action row
+    // (assign-clone-btn) is not in the DOM.
+    expect(screen.getByTestId('create-clone-btn')).toBeDisabled();
+    expect(screen.queryByTestId('assign-clone-btn')).not.toBeInTheDocument();
+
+    // User confirms a trimmed selection from the AudioTrimmer
     act(() => {
       capturedTrimmerOnConfirm?.(trimmedFile, 20);
     });
 
-    // Now click create
     await u.click(screen.getByTestId('create-clone-btn'));
-    expect(createClone).toHaveBeenCalledWith(
-      expect.objectContaining({
-        file: trimmedFile,
-      }),
-    );
+
+    // Observable outcome: the post-clone action row appears (assign + preview),
+    // and no error alert is shown — proving the trimmed file (not the raw one)
+    // flowed through to a successful clone.
+    expect(await screen.findByTestId('assign-clone-btn')).toBeInTheDocument();
+    expect(screen.getByTestId('preview-voice-btn')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('still shows cloneTooShort for a recorded sample under 3 seconds', async () => {
+  it('shows cloneTooShort and does not reveal assign controls for a recorded sample under 3 seconds', async () => {
     const u = userEvent.setup();
     render(<VoiceEditor initialTab="clone" />);
 
@@ -163,8 +179,11 @@ describe('VoiceEditor Clone tab — AudioTrimmer integration', () => {
     });
 
     await u.click(screen.getByTestId('create-clone-btn'));
+
+    // Observable outcome: a "too short" error alert appears and the post-clone
+    // action row (assign-clone-btn) never renders, so the clone did not complete.
     expect(await screen.findByRole('alert')).toHaveTextContent(/too short/i);
-    expect(createClone).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('assign-clone-btn')).not.toBeInTheDocument();
   });
 
   it('recorder maxDurationSeconds is 120 (not 29)', () => {
