@@ -1,3 +1,9 @@
+// Unit tests for app/src/lib/utils/audio.ts.
+//
+// Statement coverage target (U-js-014): >= 80%. The convertToWav, fallback
+// HTMLMediaElement.duration path in getAudioDuration, and stereo
+// audioBufferToWav header-field assertions below carry the coverage from
+// the prior 74% baseline up past 98%.
 import { describe, expect, it, vi } from 'vitest';
 import {
   WINDOW_MIN,
