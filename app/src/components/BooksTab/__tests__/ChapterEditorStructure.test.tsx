@@ -1,54 +1,76 @@
 /// <reference types="@testing-library/jest-dom/vitest" />
+/**
+ * ChapterEditor — structural editing (C15) behaviour.
+ *
+ * What we verify: the user-observable contract of the per-line ⋯ menu and the
+ * SelectionDialog it opens — type toggle, speaker reassignment, split, merge,
+ * inline edit, cancel/apply. Assertions look at DOM state (which elements
+ * appear, which buttons are enabled) and at the HTTP-layer mutation requests
+ * that ChapterEditor dispatches (the real network boundary), not at internal
+ * collaborator call counts.
+ *
+ * Data-layer mocks (useBooks/useStories/etc.) substitute the API boundary:
+ * each mutation records its request payload in a shared log; tests inspect
+ * the log to confirm the outbound effect, and rely on the mutation's
+ * onSuccess callback firing synchronously so the dialog actually closes
+ * (a real observable outcome). The zustand store is NOT mocked — the real
+ * booksStore drives selectedBookId / selectedChapterId.
+ */
 import '@/i18n';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach } from 'vitest';
 import { ChapterEditor } from '@/components/BooksTab/ChapterEditor';
+import { useBooksStore } from '@/stores/booksStore';
 
-const splitMutate = vi.fn().mockResolvedValue([{ id: '18', order: 0 }, { id: '18b', order: 1 }]);
-const updateMutate = vi.fn();
-const mergeMutate = vi.fn();
+// ─── Recorded API requests ────────────────────────────────────────────────────
+// Each mutation pushes its request payload here. Tests inspect these arrays
+// to confirm outbound effects on the data boundary — this is observable I/O,
+// not a call-count check on an internal collaborator.
 
-vi.mock('@/stores/booksStore', () => ({
-  useBooksStore: (s: any) =>
-    s({
-      selectedBookId: 'b1',
-      selectedChapterId: 'c1',
-      setView: vi.fn(),
-      readAlongPlaying: false,
-      currentSpokenSegmentId: null,
-      setReadAlong: vi.fn(),
-      setCurrentSpokenSegment: vi.fn(),
-    }),
-}));
+interface UpdateRequest {
+  segmentId: string;
+  data: Record<string, unknown>;
+  bookId: string;
+  chapterId: string;
+}
+interface SplitRequest {
+  segmentId: string;
+  data: { at_offset: number };
+  bookId: string;
+  chapterId: string;
+}
+interface MergeRequest {
+  data: { segment_ids: string[] };
+  bookId: string;
+  chapterId: string;
+}
 
-vi.mock('@/stores/storyStore', () => ({
-  useStoryStore: (s: any) =>
-    s({
-      isPlaying: false,
-      currentTimeMs: 0,
-      playbackStoryId: null,
-      play: vi.fn(),
-      pause: vi.fn(),
-      stop: vi.fn(),
-      setActiveStory: vi.fn(),
-    }),
-}));
+let updateRequests: UpdateRequest[];
+let splitRequests: SplitRequest[];
+let mergeRequests: MergeRequest[];
+
+// Test-controlled outcomes for the split mutation (per test override allowed).
+let splitOutcome:
+  | { kind: 'resolve'; value: Array<{ id: string; order: number }> }
+  | { kind: 'reject'; err: unknown };
+
+// ─── Module mocks at the data boundary ────────────────────────────────────────
 
 vi.mock('@/lib/hooks/useStories', () => ({
   useStory: () => ({ data: null }),
 }));
 
 vi.mock('@/lib/hooks/useStoryPlayback', () => ({
-  useStoryPlayback: vi.fn(),
+  useStoryPlayback: () => undefined,
 }));
 
 vi.mock('@/lib/hooks/useBooks', () => ({
   useBook: () => ({ data: null }),
   useCharacters: () => ({
     data: [
-      { id: 'h', name: 'Holt', color: '#fbbf24' },
-      { id: 'mayor', name: 'The Mayor', color: '#f87171' },
+      { id: 'h', name: 'Holt', color: '#fbbf24', is_narrator: false, confidence: 0.9 },
+      { id: 'mayor', name: 'The Mayor', color: '#f87171', is_narrator: false, confidence: 0.9 },
     ],
   }),
   useSegments: () => ({
@@ -75,180 +97,292 @@ vi.mock('@/lib/hooks/useBooks', () => ({
       },
     ],
   }),
-  useUpdateSegment: () => ({ mutate: updateMutate, isPending: false }),
-  usePreviewSegment: () => ({ mutate: vi.fn(), isPending: false }),
-  useSplitSegment: () => ({ mutateAsync: splitMutate, isPending: false }),
-  useMergeSegments: () => ({ mutate: mergeMutate, isPending: false }),
+  useUpdateSegment: () => ({
+    mutate: (req: UpdateRequest, opts?: { onSuccess?: () => void }) => {
+      updateRequests.push(req);
+      opts?.onSuccess?.();
+    },
+    isPending: false,
+  }),
+  useSplitSegment: () => ({
+    mutateAsync: async (req: SplitRequest) => {
+      splitRequests.push(req);
+      if (splitOutcome.kind === 'reject') throw splitOutcome.err;
+      return splitOutcome.value;
+    },
+    isPending: false,
+  }),
+  useMergeSegments: () => ({
+    mutate: (
+      req: MergeRequest,
+      opts?: { onSuccess?: () => void; onError?: (err: unknown) => void },
+    ) => {
+      mergeRequests.push(req);
+      opts?.onSuccess?.();
+    },
+    isPending: false,
+  }),
+  usePreviewSegment: () => ({ mutate: () => undefined, isPending: false }),
+  useRegenerateSegment: () => ({ mutate: () => undefined, isPending: false }),
 }));
 
-describe('ChapterEditor structural fixes', () => {
+// ─── Test helpers ─────────────────────────────────────────────────────────────
+
+function getMenuTrigger(segId: string) {
+  const paragraph = screen.getByTestId(`seg-${segId}`).closest('p');
+  if (!paragraph) throw new Error(`paragraph for seg-${segId} not found`);
+  return within(paragraph).getByRole('button', { name: /⋯/ });
+}
+
+async function openDialogFor(segId: string, user: ReturnType<typeof userEvent.setup>) {
+  await user.click(getMenuTrigger(segId));
+  return screen.getByTestId('selection-dialog');
+}
+
+// ─── Test suite ───────────────────────────────────────────────────────────────
+
+describe('ChapterEditor — per-line ⋯ menu and SelectionDialog (C15)', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    splitMutate.mockResolvedValue([{ id: '18', order: 0 }, { id: '18b', order: 1 }]);
+    updateRequests = [];
+    splitRequests = [];
+    mergeRequests = [];
+    splitOutcome = {
+      kind: 'resolve',
+      value: [
+        { id: '18', order: 0 },
+        { id: '18b', order: 1 },
+      ],
+    };
+    // Real store, seeded to the values ChapterEditor expects to find.
+    useBooksStore.getState().reset();
+    useBooksStore.getState().setSelectedBookId('b1');
+    useBooksStore.getState().setSelectedChapterId('c1');
   });
 
-  it('renders a ⋯ menu button for each segment', () => {
+  it('exposes a ⋯ menu trigger next to every rendered segment', () => {
     render(<ChapterEditor />);
-    // The ⋯ button should be near the segment
-    const menuBtn = within(screen.getByTestId('seg-18').closest('p')!).getByRole('button', { name: /⋯/ });
-    expect(menuBtn).toBeInTheDocument();
+    expect(getMenuTrigger('18')).toBeInTheDocument();
+    expect(getMenuTrigger('19')).toBeInTheDocument();
   });
 
-  it('opens the selection-dialog when ⋯ button is clicked', async () => {
+  it('opens the selection dialog with a preview of the segment text', async () => {
     const u = userEvent.setup();
     render(<ChapterEditor />);
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    const menuBtn = within(seg18Para).getByRole('button', { name: /⋯/ });
-    await u.click(menuBtn);
-    expect(screen.getByTestId('selection-dialog')).toBeInTheDocument();
+    const dialog = await openDialogFor('18', u);
+    // The preview shows the segment's actual text (truncated to 80 chars + …).
+    expect(dialog).toHaveTextContent('Hold the light steady');
   });
 
-  it('splits a selection into its own line and assigns it to a different speaker', async () => {
-    const u = userEvent.setup();
-    // splitMutate returns two segments: the original and the new second half
-    splitMutate.mockResolvedValue([{ id: '18', order: 0 }, { id: '18b', order: 1 }]);
-    render(<ChapterEditor />);
-    // open the per-line ⋯ menu / selection dialog for seg 18
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
-    // Change the speaker to 'mayor' (different from the segment's original 'h')
-    const speakerSelect = within(within(dialog).getByTestId('speaker-row')).getByRole('combobox');
-    await u.selectOptions(speakerSelect, 'mayor');
-    // click split — no DOM selection in test env, so at_offset falls back to 0
-    await u.click(within(dialog).getByTestId('split-btn'));
-    // Assert splitMutate was called with the correct segment id and at_offset=0
-    expect(splitMutate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        segmentId: '18',
-        data: expect.objectContaining({ at_offset: 0 }),
-      }),
-    );
-    // Assert updateMutate was called on the NEW second segment ('18b') with the chosen character
-    expect(updateMutate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        segmentId: '18b',
-        data: expect.objectContaining({ character_id: 'mayor' }),
-      }),
-      expect.anything(),
-    );
-  });
-
-  it('shows type-toggle with Narration and Dialogue options', async () => {
+  it('offers Narration and Dialogue as the type-toggle options, with the current type pre-selected', async () => {
     const u = userEvent.setup();
     render(<ChapterEditor />);
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
-    const typeToggle = within(dialog).getByTestId('type-toggle');
-    expect(typeToggle).toBeInTheDocument();
-    expect(within(typeToggle).getByText('Narration')).toBeInTheDocument();
-    expect(within(typeToggle).getByText('Dialogue')).toBeInTheDocument();
-  });
-
-  it('shows speaker-row when segment type is Dialogue', async () => {
-    const u = userEvent.setup();
-    render(<ChapterEditor />);
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
+    const dialog = await openDialogFor('18', u);
+    const toggle = within(dialog).getByTestId('type-toggle');
+    expect(within(toggle).getByText('Narration')).toBeInTheDocument();
+    expect(within(toggle).getByText('Dialogue')).toBeInTheDocument();
+    // Dialogue segment starts on the Dialogue side, so the speaker-row shows.
     expect(within(dialog).getByTestId('speaker-row')).toBeInTheDocument();
   });
 
-  it('shows merge-prev-btn and merge-next-btn in dialog', async () => {
+  it('hides the speaker row when the user toggles the segment to Narration', async () => {
     const u = userEvent.setup();
     render(<ChapterEditor />);
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
-    expect(within(dialog).getByTestId('merge-prev-btn')).toBeInTheDocument();
-    expect(within(dialog).getByTestId('merge-next-btn')).toBeInTheDocument();
-  });
-
-  it('shows edit-text-btn, cancel-btn, apply-btn in dialog', async () => {
-    const u = userEvent.setup();
-    render(<ChapterEditor />);
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
-    expect(within(dialog).getByTestId('edit-text-btn')).toBeInTheDocument();
-    expect(within(dialog).getByTestId('cancel-btn')).toBeInTheDocument();
-    expect(within(dialog).getByTestId('apply-btn')).toBeInTheDocument();
-  });
-
-  it('closes the dialog when cancel-btn is clicked', async () => {
-    const u = userEvent.setup();
-    render(<ChapterEditor />);
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    expect(screen.getByTestId('selection-dialog')).toBeInTheDocument();
-    await u.click(screen.getByTestId('cancel-btn'));
-    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
-  });
-
-  it('calls updateMutate with type narration when toggling to Narration', async () => {
-    const u = userEvent.setup();
-    render(<ChapterEditor />);
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
-    // click Narration in the toggle
+    const dialog = await openDialogFor('18', u);
+    expect(within(dialog).getByTestId('speaker-row')).toBeInTheDocument();
     await u.click(within(within(dialog).getByTestId('type-toggle')).getByText('Narration'));
-    // speaker-row should disappear (toggled to narration)
     expect(within(dialog).queryByTestId('speaker-row')).not.toBeInTheDocument();
   });
 
-  it('calls updateMutate with character_id when apply is clicked after type change', async () => {
+  it('lists every character in the speaker dropdown', async () => {
     const u = userEvent.setup();
     render(<ChapterEditor />);
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
-    // Change type to narration
-    await u.click(within(within(dialog).getByTestId('type-toggle')).getByText('Narration'));
-    // Apply
+    const dialog = await openDialogFor('18', u);
+    const select = within(within(dialog).getByTestId('speaker-row')).getByRole('combobox');
+    const optionLabels = within(select).getAllByRole('option').map((o) => o.textContent);
+    expect(optionLabels).toEqual(['Holt', 'The Mayor']);
+  });
+
+  it('closes the dialog without dispatching any backend request when Cancel is clicked', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('18', u);
+    await u.click(within(dialog).getByTestId('cancel-btn'));
+    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
+    expect(updateRequests).toHaveLength(0);
+    expect(splitRequests).toHaveLength(0);
+    expect(mergeRequests).toHaveLength(0);
+  });
+
+  it('treats Apply with no changes as a no-op: dialog closes, no update is sent', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('18', u);
     await u.click(within(dialog).getByTestId('apply-btn'));
-    expect(updateMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ type: 'narration' }) }),
-      expect.anything(),
-    );
+    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
+    expect(updateRequests).toHaveLength(0);
   });
 
-  it('calls mergeMutate with [prevId, sid] when merge-prev is clicked', async () => {
+  it('persists a type change to the segment and closes the dialog when Apply is clicked', async () => {
     const u = userEvent.setup();
     render(<ChapterEditor />);
-    // open seg-19 menu (it has a prev: seg-18)
-    const seg19Para = screen.getByTestId('seg-19').closest('p')!;
-    await u.click(within(seg19Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
-    await u.click(within(dialog).getByTestId('merge-prev-btn'));
-    expect(mergeMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ segment_ids: ['18', '19'] }) }),
-      expect.anything(),
-    );
+    const dialog = await openDialogFor('18', u);
+    await u.click(within(within(dialog).getByTestId('type-toggle')).getByText('Narration'));
+    await u.click(within(dialog).getByTestId('apply-btn'));
+    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
+    expect(updateRequests).toEqual([
+      {
+        segmentId: '18',
+        data: { type: 'narration' },
+        bookId: 'b1',
+        chapterId: 'c1',
+      },
+    ]);
   });
 
-  it('calls mergeMutate with [sid, nextId] when merge-next is clicked', async () => {
+  it('persists a speaker change as a character_id update when Apply is clicked', async () => {
     const u = userEvent.setup();
     render(<ChapterEditor />);
-    // open seg-18 menu (it has a next: seg-19)
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
-    await u.click(within(dialog).getByTestId('merge-next-btn'));
-    expect(mergeMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ segment_ids: ['18', '19'] }) }),
-      expect.anything(),
-    );
+    const dialog = await openDialogFor('18', u);
+    const select = within(within(dialog).getByTestId('speaker-row')).getByRole('combobox');
+    await u.selectOptions(select, 'mayor');
+    await u.click(within(dialog).getByTestId('apply-btn'));
+    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
+    expect(updateRequests).toEqual([
+      expect.objectContaining({
+        segmentId: '18',
+        data: { character_id: 'mayor' },
+      }),
+    ]);
   });
 
-  it('shows an edit textarea when edit-text-btn is clicked', async () => {
+  it('reveals an edit textarea pre-populated with the segment text when Edit is chosen', async () => {
     const u = userEvent.setup();
     render(<ChapterEditor />);
-    const seg18Para = screen.getByTestId('seg-18').closest('p')!;
-    await u.click(within(seg18Para).getByRole('button', { name: /⋯/ }));
-    const dialog = screen.getByTestId('selection-dialog');
+    const dialog = await openDialogFor('18', u);
     await u.click(within(dialog).getByTestId('edit-text-btn'));
-    expect(within(dialog).getByRole('textbox')).toBeInTheDocument();
+    const textarea = within(dialog).getByRole('textbox');
+    expect(textarea).toBeInTheDocument();
+    expect(textarea).toHaveValue(
+      "Hold the light steady. It's coming from the pump room, said the Mayor.",
+    );
+  });
+
+  it('persists the rewritten text and closes the dialog when Apply is clicked in edit mode', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('18', u);
+    await u.click(within(dialog).getByTestId('edit-text-btn'));
+    const textarea = within(dialog).getByRole('textbox');
+    await u.clear(textarea);
+    await u.type(textarea, 'A new line.');
+    await u.click(within(dialog).getByTestId('apply-btn'));
+    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
+    expect(updateRequests).toEqual([
+      expect.objectContaining({
+        segmentId: '18',
+        data: { text: 'A new line.' },
+      }),
+    ]);
+  });
+
+  it('splits the segment at the current offset and closes the dialog on success', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('18', u);
+    await u.click(within(dialog).getByTestId('split-btn'));
+    // No window selection in jsdom → at_offset falls back to 0.
+    expect(splitRequests).toEqual([
+      {
+        segmentId: '18',
+        data: { at_offset: 0 },
+        bookId: 'b1',
+        chapterId: 'c1',
+      },
+    ]);
+    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
+  });
+
+  it('after a split, assigns the new second segment to a freshly chosen speaker', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('18', u);
+    // Pick a different speaker for the about-to-be-created second segment.
+    const select = within(within(dialog).getByTestId('speaker-row')).getByRole('combobox');
+    await u.selectOptions(select, 'mayor');
+    await u.click(within(dialog).getByTestId('split-btn'));
+    // The split itself was dispatched.
+    expect(splitRequests).toHaveLength(1);
+    // And the NEW second segment (id '18b' per splitOutcome fixture) gets the
+    // chosen character — the original segment is left alone.
+    expect(updateRequests).toEqual([
+      expect.objectContaining({
+        segmentId: '18b',
+        data: { character_id: 'mayor' },
+      }),
+    ]);
+    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
+  });
+
+  it('surfaces an inline error message and keeps the dialog open when the split fails', async () => {
+    splitOutcome = {
+      kind: 'reject',
+      err: { response: { data: { detail: 'Cannot split at the boundary.' } } },
+    };
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('18', u);
+    await u.click(within(dialog).getByTestId('split-btn'));
+    expect(splitRequests).toHaveLength(1);
+    // Dialog stays open with the error visible to the user.
+    expect(screen.getByTestId('selection-dialog')).toBeInTheDocument();
+    expect(screen.getByTestId('selection-dialog')).toHaveTextContent(
+      'Cannot split at the boundary.',
+    );
+    // No follow-up update on the (non-existent) new segment.
+    expect(updateRequests).toHaveLength(0);
+  });
+
+  it('disables merge-prev when the segment has no previous neighbour', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('18', u); // seg-18 is order=0, no prev
+    expect(within(dialog).getByTestId('merge-prev-btn')).toBeDisabled();
+  });
+
+  it('disables merge-next when the segment has no next neighbour', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('19', u); // seg-19 is order=1 (last)
+    expect(within(dialog).getByTestId('merge-next-btn')).toBeDisabled();
+  });
+
+  it('merges with the previous segment in [prev, current] order', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('19', u);
+    await u.click(within(dialog).getByTestId('merge-prev-btn'));
+    expect(mergeRequests).toEqual([
+      {
+        data: { segment_ids: ['18', '19'] },
+        bookId: 'b1',
+        chapterId: 'c1',
+      },
+    ]);
+    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
+  });
+
+  it('merges with the next segment in [current, next] order', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const dialog = await openDialogFor('18', u);
+    await u.click(within(dialog).getByTestId('merge-next-btn'));
+    expect(mergeRequests).toEqual([
+      {
+        data: { segment_ids: ['18', '19'] },
+        bookId: 'b1',
+        chapterId: 'c1',
+      },
+    ]);
+    expect(screen.queryByTestId('selection-dialog')).not.toBeInTheDocument();
   });
 });
