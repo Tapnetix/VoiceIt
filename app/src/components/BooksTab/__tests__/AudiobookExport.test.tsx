@@ -361,4 +361,65 @@ describe('AudiobookExport', () => {
     fireEvent.dragOver(dropZone);
     expect(dropZone).toHaveTextContent(/drop cover image here/i);
   });
+
+  it('clicking download after export_complete triggers a download with the selected format and title', async () => {
+    render(<AudiobookExport />);
+
+    // Customize the title so we can verify it is forwarded to the download mutation.
+    const titleInput = screen.getByLabelText('Title') as HTMLInputElement;
+    fireEvent.change(titleInput, { target: { value: 'My Custom Title' } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('start-export-btn'));
+    });
+    act(() => {
+      exportCompleteHandler?.({
+        type: 'export_complete',
+        download_path: '/tmp/test.m4b',
+        filename: 'test.m4b',
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('download-btn'));
+    });
+
+    // Observable outcome: the download mutation was invoked with the selected
+    // format (default m4b) and the user-supplied title.
+    expect(mockDownloadExport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bookId: 'book-1',
+        bookTitle: 'My Custom Title',
+        format: 'm4b',
+      }),
+    );
+  });
+
+  it('a failed download does not crash the component or revert the complete badge', async () => {
+    // The download error is captured into errorMessage state but the JSX only
+    // renders errorMessage when phase === 'error'; on the complete phase the
+    // "Done / Export complete" badge keeps showing. This locks in that the
+    // failure does not throw and does not regress the completion state.
+    mockDownloadExport.mockRejectedValueOnce(new Error('disk full'));
+    render(<AudiobookExport />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('start-export-btn'));
+    });
+    act(() => {
+      exportCompleteHandler?.({
+        type: 'export_complete',
+        download_path: '/tmp/test.m4b',
+        filename: 'test.m4b',
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('download-btn'));
+    });
+
+    // Component still mounted; status area still shows the "Done" completion state.
+    expect(screen.getByTestId('export-status')).toHaveTextContent(/done/i);
+    expect(screen.getByTestId('download-btn')).toBeEnabled();
+  });
 });
