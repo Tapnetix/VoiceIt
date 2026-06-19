@@ -533,3 +533,168 @@ pub fn capture_focus() -> Result<FocusSnapshot, String> {
 pub fn activate_pid(_pid: i32) -> Result<(), String> {
     Err("app activation is not yet implemented on this platform".into())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Pure-logic tests for `focus_capture`.
+    //!
+    //! The macOS and Windows code paths are thin wrappers over OS FFI
+    //! (Accessibility, NSRunningApplication, UIAutomation, EnumWindows)
+    //! and must not be exercised from a unit test — they require a real
+    //! windowing session and granted Accessibility permission, neither
+    //! of which exists in CI. What *is* testable on every host:
+    //!
+    //!   1. The stub implementations the binary falls back to on
+    //!      unsupported platforms must return `Err` (so the higher-level
+    //!      `paste_final_text` flow aborts cleanly rather than silently
+    //!      "succeeding" with a no-op).
+    //!   2. `FocusSnapshot` is a Tauri IPC payload — the frontend hands
+    //!      one back to `paste_final_text` as `focus: FocusSnapshot`
+    //!      after receiving it from `debug_capture_focus`. Its JSON
+    //!      shape (field names, optional handling, signed PID) is part
+    //!      of that wire contract, so any accidental rename or type
+    //!      change would silently break auto-paste. The serde round-trip
+    //!      tests pin that shape.
+    //!
+    //! Per-platform behaviour assertions on the stub paths are gated by
+    //! the same `cfg` the stubs themselves use, so they're only compiled
+    //! on the platform whose stub they're checking.
+
+    use super::FocusSnapshot;
+
+    #[test]
+    fn focus_snapshot_serializes_with_lowercase_field_names_and_omits_nones() {
+        // Serde shape contract: the frontend serialises a FocusSnapshot
+        // straight into the `paste_final_text` Tauri command, and the
+        // backend echoes one out of `debug_capture_focus`. Field names
+        // must stay snake_case `pid` / `bundle_id` / `role` because
+        // that's what main.rs:824 documents and what the TS callers
+        // rely on. `None` for bundle_id / role must serialise as JSON
+        // `null` (not omitted) so the frontend can distinguish "we
+        // looked and found nothing" from "the backend forgot to send
+        // the field".
+        let snap = FocusSnapshot {
+            pid: 4321,
+            bundle_id: None,
+            role: None,
+        };
+        let json = serde_json::to_value(&snap).expect("FocusSnapshot must serialize");
+        assert_eq!(json["pid"], serde_json::json!(4321));
+        assert!(json.get("bundle_id").is_some(), "bundle_id key must be present even when None");
+        assert!(json["bundle_id"].is_null(), "None bundle_id must serialise as JSON null");
+        assert!(json.get("role").is_some(), "role key must be present even when None");
+        assert!(json["role"].is_null(), "None role must serialise as JSON null");
+    }
+
+    #[test]
+    fn focus_snapshot_serializes_populated_bundle_id_and_role_as_strings() {
+        // The macOS path stores reverse-DNS bundle ids ("com.apple.Safari")
+        // and AX role strings ("AXTextField"); the Windows path stores
+        // lowercase exe basenames ("voiceit.exe") and UIA class names.
+        // Both must arrive on the frontend as plain JSON strings.
+        let snap = FocusSnapshot {
+            pid: 1234,
+            bundle_id: Some("com.apple.Safari".to_string()),
+            role: Some("AXTextField".to_string()),
+        };
+        let json = serde_json::to_value(&snap).expect("FocusSnapshot must serialize");
+        assert_eq!(json["pid"], serde_json::json!(1234));
+        assert_eq!(json["bundle_id"], serde_json::json!("com.apple.Safari"));
+        assert_eq!(json["role"], serde_json::json!("AXTextField"));
+    }
+
+    #[test]
+    fn focus_snapshot_round_trips_through_json() {
+        // `paste_final_text(text, focus)` receives the snapshot from
+        // the frontend after it was emitted by `debug_capture_focus`,
+        // so the deserialise path must accept exactly what the
+        // serialise path emits — including the `null` form for absent
+        // optionals.
+        let original = FocusSnapshot {
+            pid: 9999,
+            bundle_id: Some("com.example.app".to_string()),
+            role: None,
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let decoded: FocusSnapshot = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.pid, original.pid);
+        assert_eq!(decoded.bundle_id, original.bundle_id);
+        assert_eq!(decoded.role, original.role);
+    }
+
+    #[test]
+    fn focus_snapshot_accepts_negative_pid_so_invalid_marker_round_trips() {
+        // `pid` is `i32` (not `u32`) specifically so frontend code can
+        // pass a sentinel like `-1` to mean "no focus captured" without
+        // serde rejecting it. `activate_pid` on Windows then rejects
+        // `pid <= 0` itself (see win::activate_pid). Locking the signed
+        // type prevents an accidental switch to `u32` from silently
+        // changing that contract.
+        let json = r#"{"pid":-1,"bundle_id":null,"role":null}"#;
+        let decoded: FocusSnapshot = serde_json::from_str(json).expect("negative pid must deserialize");
+        assert_eq!(decoded.pid, -1);
+        assert!(decoded.bundle_id.is_none());
+        assert!(decoded.role.is_none());
+    }
+
+    #[test]
+    fn focus_snapshot_clone_produces_independent_copy_of_owned_strings() {
+        // FocusSnapshot derives Clone because hotkey_monitor.rs stores
+        // it inside chord-start state and later hands a copy to the
+        // paste command. The Clone must deep-copy the owned String
+        // fields, not alias them, so a later mutation to one half
+        // can't surprise the other.
+        let original = FocusSnapshot {
+            pid: 7,
+            bundle_id: Some("com.example.app".to_string()),
+            role: Some("AXTextField".to_string()),
+        };
+        let cloned = original.clone();
+        assert_eq!(cloned.pid, original.pid);
+        assert_eq!(cloned.bundle_id, original.bundle_id);
+        assert_eq!(cloned.role, original.role);
+        // Sanity: the cloned strings are distinct allocations, not the
+        // same pointer — guarantees a future mutation of one wouldn't
+        // affect the other.
+        if let (Some(a), Some(b)) = (original.bundle_id.as_ref(), cloned.bundle_id.as_ref()) {
+            assert_eq!(a, b);
+            assert!(!std::ptr::eq(a.as_ptr(), b.as_ptr()));
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn capture_focus_on_unsupported_platform_returns_explanatory_error() {
+        // The stub exists so the rest of the binary can link on Linux
+        // dev hosts, but it must never appear to succeed — auto-paste
+        // would then activate a phantom PID 0 and clobber the
+        // clipboard with nothing to show for it. The error message
+        // must be descriptive enough for a triage engineer to recognise
+        // "this is the platform stub, not a real OS failure".
+        let err = super::capture_focus().expect_err("stub must return Err on Linux");
+        assert!(
+            err.to_lowercase().contains("not") && err.to_lowercase().contains("implemented"),
+            "stub error should explain it's unimplemented, got: {err}"
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn activate_pid_on_unsupported_platform_returns_explanatory_error_for_any_pid() {
+        // Same rationale as capture_focus's stub: must hard-fail rather
+        // than no-op-succeed. The PID value should be irrelevant on the
+        // stub — we accept it but always reject.
+        let err = super::activate_pid(1234).expect_err("stub must return Err on Linux");
+        assert!(
+            err.to_lowercase().contains("not") && err.to_lowercase().contains("implemented"),
+            "stub error should explain it's unimplemented, got: {err}"
+        );
+        // Negative / zero PIDs must also be rejected by the stub — the
+        // Windows path has its own `pid <= 0` guard, but on Linux the
+        // platform-not-implemented error fires first regardless.
+        let err = super::activate_pid(0).expect_err("stub must reject PID 0 too");
+        assert!(err.to_lowercase().contains("not"));
+        let err = super::activate_pid(-1).expect_err("stub must reject negative PID too");
+        assert!(err.to_lowercase().contains("not"));
+    }
+}

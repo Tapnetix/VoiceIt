@@ -1,22 +1,23 @@
-// Tests for the audio_capture module.
+// Integration test for the live system-audio capture path.
 //
-// The full end-to-end system-audio capture test requires:
+// The end-to-end test requires:
 //   1. A working host audio subsystem with a usable input/monitor device
 //      (PulseAudio/PipeWire monitor on Linux, ScreenCaptureKit on macOS,
 //      WASAPI loopback on Windows).
 //   2. Audio actively playing on the system during the test so that the
 //      monitor source produces non-silent samples.
 //
-// Neither of these is true in CI or sandboxed dev environments, so that test
-// is marked `#[ignore]` and is additionally gated at runtime on
+// Neither of these is true in CI or sandboxed dev environments, so the
+// test is marked `#[ignore]` and is additionally gated at runtime on
 // `audio_capture::is_supported()`. To run it explicitly:
 //
 //     cargo test --test audio_capture_test -- --ignored --nocapture
 //
-// The non-ignored unit tests below exercise the device-independent surface of
-// `AudioCaptureState` so default `cargo test` stays green everywhere.
+// Device-independent unit tests for `AudioCaptureState` live in
+// `mod_test.rs` so the default `cargo test` invocation stays green
+// everywhere even when no audio device is present.
 //
-// (Bug-fix per audit task F5.)
+// (Bug-fix per audit task F5; layout refactored under U-rs-001.)
 
 use base64::Engine;
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -37,72 +38,6 @@ fn has_usable_input_device() -> bool {
         Some(d) => d.default_input_config().is_ok(),
         None => false,
     }
-}
-
-#[test]
-fn new_audio_capture_state_starts_empty_with_default_format() {
-    // AudioCaptureState::new() is the entry point every capture session uses;
-    // it must hand back a clean slate with sensible CD-quality defaults so
-    // that a subsequent `start_capture` overwrite is unambiguous.
-    let state = AudioCaptureState::new();
-
-    assert!(
-        state.samples.lock().unwrap().is_empty(),
-        "fresh state should have no captured samples"
-    );
-    assert!(
-        state.error.lock().unwrap().is_none(),
-        "fresh state should carry no error"
-    );
-    assert!(
-        state.stop_tx.lock().unwrap().is_none(),
-        "fresh state should have no live stop channel"
-    );
-    assert_eq!(
-        *state.sample_rate.lock().unwrap(),
-        44100,
-        "default sample rate should be 44.1kHz"
-    );
-    assert_eq!(
-        *state.channels.lock().unwrap(),
-        2,
-        "default channel count should be stereo"
-    );
-}
-
-#[test]
-fn reset_clears_samples_and_error_but_preserves_format() {
-    // `reset` is called at the start of every capture; it should clear any
-    // residue from the previous session (samples, error) while leaving the
-    // negotiated sample-rate/channel metadata in place so a follow-up capture
-    // can reuse the detected device format.
-    let state = AudioCaptureState::new();
-
-    state.samples.lock().unwrap().extend_from_slice(&[0.1, 0.2, -0.3]);
-    *state.error.lock().unwrap() = Some("previous failure".to_string());
-    *state.sample_rate.lock().unwrap() = 48_000;
-    *state.channels.lock().unwrap() = 1;
-
-    state.reset();
-
-    assert!(
-        state.samples.lock().unwrap().is_empty(),
-        "reset should drop prior samples"
-    );
-    assert!(
-        state.error.lock().unwrap().is_none(),
-        "reset should clear prior error"
-    );
-    assert_eq!(
-        *state.sample_rate.lock().unwrap(),
-        48_000,
-        "reset should preserve the previously negotiated sample rate"
-    );
-    assert_eq!(
-        *state.channels.lock().unwrap(),
-        1,
-        "reset should preserve the previously negotiated channel count"
-    );
 }
 
 #[tokio::test]
