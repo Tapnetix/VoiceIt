@@ -29,8 +29,13 @@ vi.mock('@/components/AudioTrimmer/AudioTrimmer', () => ({
   },
 }));
 
-// Mock hooks that SampleUpload uses
-const addSampleMutateAsync = vi.fn().mockResolvedValue({});
+// Capture submissions to addSample at the hook boundary so we can assert on the
+// payload that left the component as an observable outcome of the form lifecycle.
+const submittedPayloads: Array<{ profileId: string; file: File; referenceText: string }> = [];
+const addSampleMutateAsync = vi.fn(async (payload: { profileId: string; file: File; referenceText: string }) => {
+  submittedPayloads.push(payload);
+  return {};
+});
 
 vi.mock('@/lib/hooks/useProfiles', () => ({
   useAddSample: () => ({ mutateAsync: addSampleMutateAsync, isPending: false }),
@@ -45,10 +50,12 @@ vi.mock('@/lib/hooks/useAudioPlayer', () => ({
   }),
 }));
 
+// Record the options each recorder hook was constructed with so the test can
+// observe the duration cap the component actually enforces on its recorders.
+const audioRecordingOpts: Array<{ maxDurationSeconds?: number }> = [];
 vi.mock('@/lib/hooks/useAudioRecording', () => ({
   useAudioRecording: (opts: { onRecordingComplete?: (blob: Blob, duration?: number) => void; maxDurationSeconds?: number }) => {
-    // Expose maxDurationSeconds for test inspection
-    (useAudioRecording as any)._lastMaxDuration = opts.maxDurationSeconds;
+    audioRecordingOpts.push({ maxDurationSeconds: opts.maxDurationSeconds });
     return {
       isRecording: false,
       duration: 0,
@@ -60,9 +67,10 @@ vi.mock('@/lib/hooks/useAudioRecording', () => ({
   },
 }));
 
+const systemAudioOpts: Array<{ maxDurationSeconds?: number }> = [];
 vi.mock('@/lib/hooks/useSystemAudioCapture', () => ({
   useSystemAudioCapture: (opts: { maxDurationSeconds?: number }) => {
-    (useSystemAudioCapture as any)._lastMaxDuration = opts.maxDurationSeconds;
+    systemAudioOpts.push({ maxDurationSeconds: opts.maxDurationSeconds });
     return {
       isRecording: false,
       duration: 0,
@@ -103,28 +111,31 @@ vi.mock('@/lib/hooks/useReferenceTranscript', () => ({
   },
 }));
 
-// Import hooks for introspection
-import { useAudioRecording } from '@/lib/hooks/useAudioRecording';
-import { useSystemAudioCapture } from '@/lib/hooks/useSystemAudioCapture';
-
 // ---- helpers ----
 
-function renderSampleUpload(open = true) {
-  return render(
-    <SampleUpload profileId="p1" open={open} onOpenChange={vi.fn()} />,
-  );
+function renderSampleUpload() {
+  const openStates: boolean[] = [];
+  const onOpenChange = (next: boolean) => {
+    openStates.push(next);
+  };
+  return {
+    openStates,
+    ...render(<SampleUpload profileId="p1" open={true} onOpenChange={onOpenChange} />),
+  };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  addSampleMutateAsync.mockResolvedValue({});
+  submittedPayloads.length = 0;
+  audioRecordingOpts.length = 0;
+  systemAudioOpts.length = 0;
   hookArgs.length = 0;
 });
 
 // ---- tests ----
 
 describe('SampleUpload — AudioTrimmer integration', () => {
-  it('T1: selecting a file mounts AudioTrimmer instead of showing a too-long error', async () => {
+  it('shows the trimmer (and no duration rejection) when a long file is selected', async () => {
     const u = userEvent.setup();
     renderSampleUpload();
 
@@ -144,9 +155,9 @@ describe('SampleUpload — AudioTrimmer integration', () => {
     expect(screen.queryByText(/duration/i)).not.toBeInTheDocument();
   });
 
-  it('T2: after trimmer confirms, submit sends the trimmed file (not the raw file)', async () => {
+  it('submits the trimmed clip (not the originally selected raw file)', async () => {
     const u = userEvent.setup();
-    renderSampleUpload();
+    const { openStates } = renderSampleUpload();
 
     // Select a file
     const fileInput = document.querySelector('input[type=file]') as HTMLInputElement;
@@ -166,18 +177,20 @@ describe('SampleUpload — AudioTrimmer integration', () => {
     // Submit the form
     await u.click(screen.getByRole('button', { name: /add sample/i }));
 
-    // Should have called addSample with the TRIMMED file (reference-trimmed.wav)
+    // Observable outcomes:
+    //  (a) the dialog closes (the component requests open=false on success)
+    //  (b) the payload that left the component carries the trimmed file, NOT the raw one
     await waitFor(() => {
-      expect(addSampleMutateAsync).toHaveBeenCalledWith(
-        expect.objectContaining({
-          profileId: 'p1',
-          file: expect.objectContaining({ name: 'reference-trimmed.wav' }),
-        }),
-      );
+      expect(openStates.at(-1)).toBe(false);
     });
+    const submitted = submittedPayloads.at(-1);
+    expect(submitted?.profileId).toBe('p1');
+    expect(submitted?.file.name).toBe('reference-trimmed.wav');
+    expect(submitted?.file.name).not.toBe('long-recording.wav');
+    expect(submitted?.referenceText).toBe('Hello world this is my reference text');
   });
 
-  it('T3: re-selecting a file re-opens the trimmer (trimmer replaces previous selection)', async () => {
+  it('replaces the trimmer source when a different file is selected', async () => {
     const u = userEvent.setup();
     renderSampleUpload();
 
@@ -196,16 +209,16 @@ describe('SampleUpload — AudioTrimmer integration', () => {
     });
   });
 
-  it('T4: maxDurationSeconds is 120 on both recorders', () => {
+  it('caps recordable duration at 120 seconds for both mic and system recorders', () => {
     renderSampleUpload();
 
-    // Check useAudioRecording was called with 120
-    expect((useAudioRecording as any)._lastMaxDuration).toBe(120);
-    // Check useSystemAudioCapture was called with 120
-    expect((useSystemAudioCapture as any)._lastMaxDuration).toBe(120);
+    // The component must wire a 120s cap into both recorder hooks so users
+    // cannot capture clips longer than the model accepts.
+    expect(audioRecordingOpts.at(-1)?.maxDurationSeconds).toBe(120);
+    expect(systemAudioOpts.at(-1)?.maxDurationSeconds).toBe(120);
   });
 
-  it('T5: confirming the trim passes the trimmed file to useReferenceTranscript', async () => {
+  it('drives transcription off the trimmed clip once the trimmer confirms', async () => {
     const u = userEvent.setup();
     renderSampleUpload();
 
@@ -216,10 +229,14 @@ describe('SampleUpload — AudioTrimmer integration', () => {
     // Trimmer appears
     await screen.findByTestId('audio-trimmer');
 
+    // Before confirmation, useReferenceTranscript should NOT have seen the trimmed
+    // file — it should still be receiving null (or the raw file is not promoted).
+    expect(hookArgs.some((a) => a.file?.name === 'reference-trimmed.wav')).toBe(false);
+
     // Confirm the trim
     await u.click(screen.getByTestId('trimmer-confirm'));
 
-    // Hook should have been called with the trimmed file
+    // After confirmation, the trimmed clip must flow into the transcription pipeline.
     await waitFor(() =>
       expect(hookArgs.some((a) => a.file?.name === 'reference-trimmed.wav')).toBe(true),
     );
