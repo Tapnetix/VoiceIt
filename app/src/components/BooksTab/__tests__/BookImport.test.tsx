@@ -4,11 +4,26 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { BookImport } from '@/components/BooksTab/BookImport';
+import { useBooksStore } from '@/stores/booksStore';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
+//
+// Only the data-fetching boundary (`useBooks` hooks) is mocked — those wrap
+// network I/O via TanStack Query. Everything else is the real component +
+// real zustand store, so assertions can hit observable outcomes (rendered
+// text, store transitions) instead of internal call counts.
 
 const mockImportMutate = vi.fn();
-const mockAnalyzeMutate = vi.fn();
+// The analyze mutation's onSuccess callback is what flips the books-store view,
+// so the mock invokes it synchronously to let tests observe that transition.
+const mockAnalyzeMutate = vi.fn(
+  (
+    _vars: unknown,
+    opts?: { onSuccess?: (data: unknown, vars: unknown, ctx: unknown) => void },
+  ) => {
+    opts?.onSuccess?.(undefined, _vars, undefined);
+  },
+);
 
 const importedBook = {
   id: 'b1',
@@ -44,6 +59,17 @@ import { useImportBook, useAnalyzeBook } from '@/lib/hooks/useBooks';
 const wrap = (ui: React.ReactNode) => (
   <QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>
 );
+
+beforeEach(() => {
+  // Reset the real zustand store between tests so view/selection assertions
+  // are not polluted by neighbours.
+  useBooksStore.getState().reset();
+  mockImportMutate.mockClear();
+  mockAnalyzeMutate.mockClear();
+  mockAnalyzeMutate.mockImplementation((_vars, opts) => {
+    opts?.onSuccess?.(undefined, _vars, undefined);
+  });
+});
 
 // ── Tests: imported-book state ────────────────────────────────────────────────
 
@@ -179,7 +205,7 @@ describe('BookImport — extension validation', () => {
 // ── Tests: analyze action ─────────────────────────────────────────────────────
 
 describe('BookImport — analyze action', () => {
-  it('calls analyzeBook.mutate when Analyze is clicked', async () => {
+  it('navigates to the analysis view for the imported book once analyze succeeds', () => {
     vi.mocked(useImportBook).mockReturnValue({
       mutate: mockImportMutate,
       data: importedBook,
@@ -189,42 +215,56 @@ describe('BookImport — analyze action', () => {
       mutate: mockAnalyzeMutate,
       isPending: false,
     } as unknown as ReturnType<typeof useAnalyzeBook>);
+
+    // Sanity-check starting state — confirms the post-click transition is
+    // a real change, not a no-op.
+    expect(useBooksStore.getState().view).toBe('library');
+    expect(useBooksStore.getState().selectedBookId).toBeNull();
 
     render(wrap(<BookImport />));
     fireEvent.click(screen.getByTestId('analyze-btn'));
-    expect(mockAnalyzeMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ bookId: 'b1' }),
-      expect.any(Object),
-    );
+
+    expect(useBooksStore.getState().view).toBe('analysis');
+    expect(useBooksStore.getState().selectedBookId).toBe('b1');
   });
 
-  it('disables analyze button while analyzing', () => {
+  it('keeps the user on the import view when analysis is still pending', () => {
     vi.mocked(useImportBook).mockReturnValue({
       mutate: mockImportMutate,
       data: importedBook,
       isPending: false,
     } as unknown as ReturnType<typeof useImportBook>);
+    // While pending, the mutation should not deliver onSuccess — the store
+    // therefore stays put even if the user manages to fire the click handler.
+    const pendingMutate = vi.fn();
     vi.mocked(useAnalyzeBook).mockReturnValue({
-      mutate: mockAnalyzeMutate,
+      mutate: pendingMutate,
       isPending: true,
     } as unknown as ReturnType<typeof useAnalyzeBook>);
 
     render(wrap(<BookImport />));
-    expect(screen.getByTestId('analyze-btn')).toBeDisabled();
+    const btn = screen.getByTestId('analyze-btn');
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveTextContent(/analyzing/i);
+    expect(useBooksStore.getState().view).toBe('library');
+    expect(useBooksStore.getState().selectedBookId).toBeNull();
   });
 
-  it('shows analyzing text while analyzing', () => {
+  it('does not change the view when the imported book is missing', () => {
     vi.mocked(useImportBook).mockReturnValue({
       mutate: mockImportMutate,
-      data: importedBook,
+      data: undefined,
       isPending: false,
     } as unknown as ReturnType<typeof useImportBook>);
     vi.mocked(useAnalyzeBook).mockReturnValue({
       mutate: mockAnalyzeMutate,
-      isPending: true,
+      isPending: false,
     } as unknown as ReturnType<typeof useAnalyzeBook>);
 
     render(wrap(<BookImport />));
-    expect(screen.getByTestId('analyze-btn')).toHaveTextContent(/analyzing/i);
+    // No analyze button rendered without a book, and the store stays neutral.
+    expect(screen.queryByTestId('analyze-btn')).not.toBeInTheDocument();
+    expect(useBooksStore.getState().view).toBe('library');
+    expect(useBooksStore.getState().selectedBookId).toBeNull();
   });
 });
