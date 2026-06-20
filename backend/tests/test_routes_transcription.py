@@ -414,7 +414,15 @@ def test_transcribe_download_task_marks_error_when_load_fails(
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-    asyncio.get_event_loop().run_until_complete(_drain())
+    # Use a fresh loop — pytest-asyncio's session fixture may have closed the
+    # default one, and `asyncio.get_event_loop()` no longer auto-creates a
+    # replacement in Python 3.10+ (it raises when called from a non-async
+    # context without a current loop, e.g. inside a sync test like this).
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_drain())
+    finally:
+        loop.close()
 
     active = fresh_task_manager.get_active_downloads()
     assert len(active) == 1

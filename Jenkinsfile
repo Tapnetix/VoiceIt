@@ -84,6 +84,22 @@ pipeline {
                             export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
                             command -v just >/dev/null 2>&1 || cargo install just --locked
                             python3 --version
+                            # backend/services/audiobook_export.py shells out to
+                            # ffmpeg/ffprobe; the pockeo-linux agent doesn't ship
+                            # them. Drop a static build into $HOME/.local/bin
+                            # (idempotent — keeps the binary across builds for a
+                            # ~30 MB one-time download).
+                            if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+                                mkdir -p "$HOME/.local/bin"
+                                TMP=$(mktemp -d)
+                                curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+                                    -o "$TMP/ff.tar.xz"
+                                tar -xJf "$TMP/ff.tar.xz" -C "$TMP"
+                                cp "$TMP"/ffmpeg-*-amd64-static/ffmpeg "$TMP"/ffmpeg-*-amd64-static/ffprobe "$HOME/.local/bin/"
+                                rm -rf "$TMP"
+                            fi
+                            ffmpeg -version | head -1
+                            ffprobe -version | head -1
                             # Recreate the venv from scratch — see the Linux Build
                             # stage's note about stale shebangs after workspace
                             # renames.
