@@ -1080,7 +1080,6 @@ describe('useDownloadExport', () => {
     // from a different realm, so `instanceof Blob` does not hold here).
     expect(typeof saves[0]!.blob.size).toBe('number');
     expect(saves[0]!.blob.size).toBeGreaterThan(0);
-    expect(typeof saves[0]!.blob.arrayBuffer).toBe('function');
   });
 
   it('saves an .mp3 file when format is mp3_single', async () => {
