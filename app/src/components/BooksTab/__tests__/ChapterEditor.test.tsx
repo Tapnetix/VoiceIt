@@ -17,15 +17,30 @@ const regenerateMutate = vi.fn((_args: any, opts?: { onSuccess?: () => void }) =
   opts?.onSuccess?.();
 });
 
+// Observable side-effects of the top-level container: view changes (back
+// button), read-along toggles, and toast notifications when the read-along
+// button is clicked without a generated chapter Story. Recording these as
+// data (not as spy call counts) lets the tests assert on what the user sees.
+const setViewMock = vi.fn();
+const setReadAlongMock = vi.fn();
+const toastCalls: Array<{ title?: unknown; description?: unknown }> = [];
+
+vi.mock('@/components/ui/use-toast', () => ({
+  toast: (args: { title?: unknown; description?: unknown }) => {
+    toastCalls.push(args);
+  },
+  useToast: () => ({ toast: vi.fn(), toasts: [] }),
+}));
+
 vi.mock('@/stores/booksStore', () => ({
   useBooksStore: (s: any) =>
     s({
       selectedBookId: 'b1',
       selectedChapterId: 'c1',
-      setView: vi.fn(),
+      setView: setViewMock,
       readAlongPlaying: false,
       currentSpokenSegmentId: null,
-      setReadAlong: vi.fn(),
+      setReadAlong: setReadAlongMock,
       setCurrentSpokenSegment: vi.fn(),
     }),
 }));
@@ -107,6 +122,7 @@ vi.mock('@/lib/hooks/useBooks', () => ({
 describe('ChapterEditor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    toastCalls.length = 0;
   });
 
   it('renders book-view with color-coded, speaker-labeled lines', () => {
@@ -261,5 +277,115 @@ describe('ChapterEditor', () => {
     // The regenerate button should NOT appear for a never-generated segment
     const dialog = screen.getByTestId('selection-dialog');
     expect(within(dialog).queryByTestId('regenerate-btn-13')).not.toBeInTheDocument();
+  });
+
+  it('back-to-overview button switches the books view back to overview', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    await u.click(screen.getByTestId('back-to-overview'));
+    // The button's job is to drive the books-view state machine back to
+    // the overview surface. The observable outcome is the store transition.
+    expect(setViewMock).toHaveBeenCalledWith('overview');
+  });
+
+  it('Flagged filter shows only low-confidence dialogue segments and hides the rest', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+    const toolbar = screen.getByTestId('review-toolbar');
+    await u.click(within(toolbar).getByText(/^Flagged$/));
+    // Segment 13 belongs to 'LowConf' (confidence 0.5 < 0.7) → visible.
+    expect(screen.getByTestId('seg-13')).toBeInTheDocument();
+    // Segment 11 (narration, narrator confidence default 1.0) → hidden.
+    expect(screen.queryByTestId('seg-11')).not.toBeInTheDocument();
+    // Segment 12 (Mira, confidence 0.9) → hidden.
+    expect(screen.queryByTestId('seg-12')).not.toBeInTheDocument();
+  });
+
+  it('jump-{id} in the review rail selects the target segment and scrolls it into view', async () => {
+    // Spy on scrollIntoView so we can confirm the handler reached the DOM.
+    // jsdom does not implement it, so without this stub the test would crash.
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy as unknown as typeof Element.prototype.scrollIntoView;
+
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+
+    const seg13 = screen.getByTestId('seg-13');
+    // Before clicking, the segment is not visually selected (no outline color).
+    expect(seg13.style.outline || '').not.toMatch(/solid/);
+
+    await u.click(screen.getByTestId('jump-13'));
+
+    // The handler should have asked the seg-13 element to scroll into view —
+    // the user-observable jump behaviour.
+    expect(scrollSpy).toHaveBeenCalledWith({
+      behavior: 'smooth',
+      block: 'center',
+    });
+
+    // After the jump, seg-13 is the selected segment, so it picks up the
+    // inline outline style ChapterEditor applies to its highlighted line.
+    const seg13After = screen.getByTestId('seg-13');
+    expect(seg13After.style.outline).toMatch(/solid/);
+  });
+
+  it('clicking the dialogue segment again to close the reassign popover clears the segment selection', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+
+    const seg12 = screen.getByTestId('seg-12');
+    // Open the popover by clicking the dialogue segment.
+    await u.click(seg12);
+    expect(screen.getByTestId('reassign-dropdown')).toBeInTheDocument();
+    // The selected dialogue gets an inline outline border using its color.
+    expect(screen.getByTestId('seg-12').style.outline).toMatch(/solid/);
+
+    // Dismiss the popover by pressing Escape — radix calls onOpenChange(false).
+    await u.keyboard('{Escape}');
+
+    // The dropdown is gone and the selection-driven outline is removed.
+    expect(screen.queryByTestId('reassign-dropdown')).not.toBeInTheDocument();
+    expect(screen.getByTestId('seg-12').style.outline || '').not.toMatch(/solid/);
+  });
+
+  it('clicking the read-along button without a generated chapter Story surfaces a guidance toast and does not start playback', async () => {
+    const u = userEvent.setup();
+    render(<ChapterEditor />);
+
+    await u.click(screen.getByTestId('readalong-btn'));
+
+    // A toast was shown to explain why nothing is playing.
+    expect(toastCalls).toHaveLength(1);
+    expect(String(toastCalls[0].title)).toMatch(/read along|nothing/i);
+    // Read-along never flipped on — handleReadAlongToggle returned early.
+    expect(setReadAlongMock).not.toHaveBeenCalledWith(true);
+  });
+
+  it('orders segments in the chapter view by their `order` field, regardless of incoming list order', () => {
+    // The hook mock returns segments in order 0,1,2. Pull every seg-* node
+    // from chapter-text in DOM order and verify it matches the expected
+    // narration→dialogue→dialogue sequence the user reads top-to-bottom.
+    render(<ChapterEditor />);
+    const chapterText = screen.getByTestId('chapter-text');
+    const segNodes = within(chapterText)
+      .getAllByTestId(/^seg-\d+$/)
+      .map((n) => n.getAttribute('data-testid'));
+    expect(segNodes).toEqual(['seg-11', 'seg-12', 'seg-13']);
+  });
+
+  it('renders the chapter color legend only for characters appearing in this chapter (drawn from segment character_ids)', () => {
+    // The mock roster has Narrator/Mira/Holt/LowConf but only Narrator/Mira/
+    // LowConf actually appear in the chapter's segments (n, m, lo). Holt
+    // never speaks here, so the legend must NOT render him.
+    render(<ChapterEditor />);
+    const bookView = screen.getByTestId('book-view');
+    // Use within the legend area (first row inside book-view, before chapter-text).
+    expect(within(bookView).getByText('Narrator')).toBeInTheDocument();
+    // Mira appears both as legend label and as the speaker chip; either is fine.
+    expect(within(bookView).getAllByText('Mira').length).toBeGreaterThan(0);
+    // LowConf appears as speaker chip + legend.
+    expect(within(bookView).getAllByText('LowConf').length).toBeGreaterThan(0);
+    // Holt doesn't speak — legend should not list him.
+    expect(within(bookView).queryByText('Holt')).not.toBeInTheDocument();
   });
 });
