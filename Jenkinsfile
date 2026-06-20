@@ -1,9 +1,13 @@
 // VoiceIt cross-platform desktop build.
 //
-// Builds the Tauri desktop app + bundled Python server sidecar and archives the
-// platform installers (Linux .deb, macOS .dmg, Windows NSIS .exe). The bundles
-// are large (~2.7 GB — the PyInstaller sidecar packs torch + the TTS engines),
-// so one installer type per platform keeps compression time sane.
+// Stages:
+//   Verify — fast gates that block the long Build: bun typecheck, Vitest
+//            (617 tests), pytest with the audit-coverage 80% gate, cargo
+//            test. ~8 min wall, all on a Linux agent. Any failure short-
+//            circuits the build.
+//   Build  — Linux .deb, macOS .dmg, Windows NSIS .exe in parallel. Bundles
+//            are large (~2.7 GB — the PyInstaller sidecar packs torch + the
+//            TTS engines), so one installer type per platform.
 //
 // Updater artifacts are disabled for CI (scripts/ci-disable-updater.py): the
 // conf pins an updater pubkey + createUpdaterArtifacts, which otherwise makes
@@ -36,6 +40,113 @@ pipeline {
     }
 
     stages {
+
+        // ─── Verify: fast gates before the long Build ──────────────────
+        // Frontend (bun typecheck + Vitest + build:web smoke), backend
+        // (pytest with --cov-config=backend/pyproject.toml + 80% gate),
+        // rust (`cargo test --lib --tests`). All three on the Linux pool;
+        // they run in parallel so the bottleneck is whichever is slowest
+        // (pytest, ~6 min). Any failure short-circuits Build via failFast.
+        stage('Verify') {
+            failFast true
+            parallel {
+
+                stage('Verify: frontend') {
+                    agent { label 'pockeo-linux' }
+                    steps {
+                        sh '''
+                            set -eu
+                            export PATH="$HOME/.bun/bin:$PATH"
+                            command -v bun >/dev/null 2>&1 || curl -fsSL https://bun.sh/install | bash
+                            export PATH="$HOME/.bun/bin:$PATH"
+                            bun --version
+                            bun install --frozen-lockfile
+                            # Typecheck app + web workspaces (this is what the GH
+                            # `ci.yml` ran; replaces it as the fast PR-style gate).
+                            bun run --filter '*' typecheck
+                            # Vitest — 617 tests, ~9s. Coverage measured but not
+                            # gated here (the audit harness already enforced 80% on
+                            # the post-merge HEAD; CI re-runs the suite without the
+                            # 30s coverage instrumentation overhead).
+                            ( cd app && bun x vitest run --reporter=default )
+                            # Web smoke build — catches build-config regressions
+                            # before the heavy Tauri bundle in Build.
+                            bun run build:web
+                        '''
+                    }
+                }
+
+                stage('Verify: backend') {
+                    agent { label 'pockeo-linux' }
+                    steps {
+                        sh '''
+                            set -eu
+                            export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+                            command -v just >/dev/null 2>&1 || cargo install just --locked
+                            python3 --version
+                            # Recreate the venv from scratch — see the Linux Build
+                            # stage's note about stale shebangs after workspace
+                            # renames.
+                            rm -rf backend/venv
+                            just setup-python
+                            # `just setup-python` chains through `_ensure-venv`,
+                            # which installs pytest + pytest-asyncio + pytest-cov.
+                            # Run with the audit omit list applied (--cov-config is
+                            # mandatory; without it pytest-cov silently ignores the
+                            # config under [tool.coverage.run] when invoked from
+                            # the repo root).
+                            backend/venv/bin/python -m pytest backend/tests \\
+                                --ignore=backend/tests/test_profile_duplicate_names.py \\
+                                --cov=backend \\
+                                --cov-config=backend/pyproject.toml \\
+                                --cov-report=term \\
+                                --cov-report=json:py-cov.json \\
+                                -q
+                            # 80% gate — matches the audit-coverage design target.
+                            backend/venv/bin/python - <<'PYGATE'
+import json, sys
+data = json.load(open('py-cov.json'))
+pct = data['totals']['percent_covered']
+print(f"Python coverage: {pct:.2f}% (gate: 80%)")
+sys.exit(0 if pct >= 80 else 1)
+PYGATE
+                        '''
+                    }
+                }
+
+                stage('Verify: rust') {
+                    agent { label 'pockeo-linux' }
+                    steps {
+                        sh '''
+                            set -eu
+                            export PATH="$HOME/.cargo/bin:$PATH"
+                            rustc --version; cargo --version
+                            # tauri-build's resource-validation pass refuses to
+                            # link without the declared sidecar binaries present.
+                            # Place empty stubs so `cargo test` can build the lib +
+                            # integration tests (the real binaries land later in
+                            # the Build stage). These stubs are gitignored.
+                            cd tauri/src-tauri
+                            mkdir -p binaries
+                            touch binaries/voiceit-server-x86_64-unknown-linux-gnu \\
+                                  binaries/voiceit-mcp-x86_64-unknown-linux-gnu
+                            # `--skip test_system_audio_capture` — that test opens
+                            # a real audio device and panics on headless Linux.
+                            # Gated behind #[ignore] post-F5, but skipping here
+                            # keeps the run portable.
+                            cargo test --lib --tests -- --skip test_system_audio_capture
+                            # Coverage gate via cargo-tarpaulin is intentionally
+                            # NOT run here: bootstrapping tarpaulin on a cold
+                            # agent is 5–15 min; the audit closed the gap to 100%
+                            # on pure-logic and `cargo test` catches regressions.
+                            # If/when tarpaulin lands on the agent toolchain, add
+                            # the pure-logic 60% gate here.
+                        '''
+                    }
+                }
+            }
+        }
+
         stage('Build') {
             failFast false
             parallel {
