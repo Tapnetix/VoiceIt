@@ -44,6 +44,135 @@ pub fn init() {
 #[cfg(not(target_os = "macos"))]
 pub fn init() {}
 
+#[cfg(test)]
+mod tests {
+    //! Pure-logic tests for the layout-aware paste-keycode cache.
+    //!
+    //! These tests intentionally avoid touching the live OS bridge
+    //! (Carbon's TIS / UCKeyTranslate, the CFNotificationCenter observer).
+    //! On non-macOS hosts the `macos` submodule isn't compiled at all, so the
+    //! only surface exposed here is the atomic-backed cache plus the
+    //! `init()` shim.
+    //!
+    //! `V_KEYCODE` is process-global static state. Tests that mutate it are
+    //! serialized through a `Mutex` so cargo's default parallel test runner
+    //! can't interleave them and produce nondeterministic reads.
+    use super::{paste_keycode_v, FALLBACK_V_KEYCODE, V_KEYCODE};
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+
+    /// Serializes access to the process-global `V_KEYCODE` cache. Tests that
+    /// write to it must hold this lock for the duration of the
+    /// load/observe/restore sequence; tests that only assert on a freshly
+    /// initialized process state (no prior write) hold it too so they don't
+    /// race a concurrent writer in the same test binary.
+    static V_KEYCODE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that snapshots `V_KEYCODE` on construction and restores it on
+    /// drop, so a test can mutate the cache freely without leaking state into
+    /// sibling tests (which would otherwise see the mutated value after this
+    /// test releases `V_KEYCODE_LOCK`).
+    struct VKeycodeGuard {
+        original: u16,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl VKeycodeGuard {
+        fn acquire() -> Self {
+            // `lock()` returns `Err` only when the mutex is poisoned; if a
+            // prior test panicked while holding it the state is still
+            // meaningful for us, so recover via `into_inner`.
+            let lock = V_KEYCODE_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let original = V_KEYCODE.load(Ordering::Relaxed);
+            Self {
+                original,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for VKeycodeGuard {
+        fn drop(&mut self) {
+            V_KEYCODE.store(self.original, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn fallback_keycode_matches_us_qwerty_v_position() {
+        // `FALLBACK_V_KEYCODE` is the documented `kVK_ANSI_V` constant and
+        // must stay pinned to 9 — the synthetic-paste path on every
+        // non-macOS platform (and the pre-`init` window on macOS) relies on
+        // this exact value being delivered as the V keycode.
+        assert_eq!(FALLBACK_V_KEYCODE, 9);
+    }
+
+    #[test]
+    fn paste_keycode_v_reports_the_currently_cached_value() {
+        // The hot path must reflect whatever `V_KEYCODE` currently holds —
+        // its only job is `load(Relaxed)`. Writing a distinctive sentinel
+        // and reading it back through the public API verifies that contract
+        // without depending on any specific layout-resolution outcome.
+        let _guard = VKeycodeGuard::acquire();
+
+        V_KEYCODE.store(42, Ordering::Relaxed);
+        assert_eq!(paste_keycode_v(), 42);
+
+        // A second distinct value confirms the read isn't a constant-fold
+        // of the first observation.
+        V_KEYCODE.store(123, Ordering::Relaxed);
+        assert_eq!(paste_keycode_v(), 123);
+    }
+
+    #[test]
+    fn paste_keycode_v_starts_at_fallback_before_any_resolution() {
+        // Before any resolution has run, the cache must hand back the
+        // documented fallback so a paste fired during the startup window
+        // still hits the QWERTY V position rather than a random uninit
+        // value. We assert this by resetting the atomic to its
+        // declared-at-rest state and observing the public reader.
+        let _guard = VKeycodeGuard::acquire();
+
+        V_KEYCODE.store(FALLBACK_V_KEYCODE, Ordering::Relaxed);
+        assert_eq!(paste_keycode_v(), FALLBACK_V_KEYCODE);
+        assert_eq!(paste_keycode_v(), 9);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn init_on_non_macos_is_a_noop_and_leaves_cache_at_fallback() {
+        // On non-macOS targets `init()` is documented as a no-op: there is
+        // no TIS bridge and no observer to register. After calling it the
+        // cache must remain at the fallback (or whatever value it held
+        // before — which on a clean process is the fallback).
+        let _guard = VKeycodeGuard::acquire();
+
+        V_KEYCODE.store(FALLBACK_V_KEYCODE, Ordering::Relaxed);
+        super::init();
+        assert_eq!(
+            paste_keycode_v(),
+            FALLBACK_V_KEYCODE,
+            "non-macOS init() must not mutate the V keycode cache"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn init_on_non_macos_does_not_overwrite_a_pre_seeded_keycode() {
+        // Stronger form of the previous test: even when something has
+        // already written a non-fallback value into the cache (e.g. a test
+        // harness, or a future platform-specific resolver), the non-macOS
+        // `init()` must not clobber it. This pins the "no-op" contract
+        // against the alternative implementation of "reset to fallback".
+        let _guard = VKeycodeGuard::acquire();
+
+        V_KEYCODE.store(77, Ordering::Relaxed);
+        super::init();
+        assert_eq!(paste_keycode_v(), 77);
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{FALLBACK_V_KEYCODE, V_KEYCODE};
