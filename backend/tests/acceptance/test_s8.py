@@ -1,5 +1,7 @@
 """Acceptance test S8: POST /stories + GET /stories/{id} round-trip preserves segment ordering.
 
+Target surface: backend/routes/stories.py — the public stories HTTP API.
+
 Scenario coverage:
   - S8.1: Story created via POST /stories is retrievable by ID with the same
     identity and metadata (round-trip identity).
