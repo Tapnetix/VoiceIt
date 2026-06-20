@@ -349,4 +349,37 @@ describe('S5: switching tabs during a recording releases the MediaStream', () =>
       expect(result.current.isRecording).toBe(false);
     },
   );
+
+  it(
+    'S5: unmounting the recorder mid-recording also releases the MediaStream',
+    async () => {
+      // A "tab switch" in ProfileForm is sometimes structural — the dialog
+      // closes, or the parent re-renders away from the record tab and the
+      // component holding the hook is torn down. In that path the cleanup
+      // contract still has to hold: the cleanup effect inside
+      // `useAudioRecording` must stop every captured track even when no
+      // explicit cancelRecording() call precedes the unmount.
+      const { stream, trackStops } = createFakeStream(1);
+      installMediaDevices(stream);
+
+      const Wrapper = wrapperWithPlatform(makePlatform());
+      const { result, unmount } = renderHook(
+        () => useAudioRecording({ maxDurationSeconds: 30 }),
+        { wrapper: Wrapper },
+      );
+
+      await act(async () => {
+        await result.current.startRecording();
+      });
+      await waitFor(() => expect(result.current.isRecording).toBe(true));
+      expect(trackStops[0]).not.toHaveBeenCalled();
+
+      await act(async () => {
+        unmount();
+      });
+
+      // Cleanup effect ran on unmount and released the mic.
+      expect(trackStops[0]).toHaveBeenCalledTimes(1);
+    },
+  );
 });
