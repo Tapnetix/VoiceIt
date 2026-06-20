@@ -11,6 +11,15 @@
 
 use voiceit::audio_capture::AudioCaptureState;
 
+// Re-export contract: `mod.rs` promises that whichever OS submodule is
+// active (linux / macos / windows), its `start_capture`, `stop_capture`
+// and `is_supported` symbols are reachable through the parent module's
+// public surface. Imports are the assertion — if the contract ever
+// regresses (e.g. a `cfg(target_os = ...)` typo), this file stops
+// compiling and the test target turns red.
+#[allow(unused_imports)]
+use voiceit::audio_capture::{is_supported, start_capture, stop_capture};
+
 #[test]
 fn new_state_exposes_clean_empty_session_with_cd_quality_defaults() {
     // `AudioCaptureState::new()` is the canonical constructor every
