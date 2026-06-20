@@ -266,3 +266,101 @@ def test_get_db_closes_session_even_when_caller_raises(fresh_session_module):
         gen.throw(RuntimeError("boom"))
 
     assert db.in_transaction() is False
+
+
+# ---------------------------------------------------------------------------
+# Engine / SessionLocal configuration
+# ---------------------------------------------------------------------------
+
+
+def test_init_db_engine_allows_cross_thread_access(fresh_session_module):
+    """FastAPI dispatches request handlers across a thread pool, so the SQLite
+    engine must be created with check_same_thread=False; otherwise sessions
+    handed out by get_db raise ProgrammingError when used on a worker thread
+    other than the one that opened them.
+
+    Verify by opening a connection on the main thread and reusing it from a
+    worker thread — with check_same_thread=False this is permitted; without
+    it sqlite3 raises.
+    """
+    import threading
+    from sqlalchemy import text
+
+    session_module.init_db()
+
+    conn = session_module.engine.connect()
+    try:
+        result_holder: dict = {}
+
+        def worker():
+            try:
+                result_holder["value"] = conn.execute(text("SELECT 1")).scalar()
+            except Exception as exc:  # pragma: no cover - failure path is the assertion
+                result_holder["error"] = exc
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+
+        assert "error" not in result_holder, f"cross-thread use raised: {result_holder.get('error')!r}"
+        assert result_holder["value"] == 1
+    finally:
+        conn.close()
+
+
+def test_init_db_session_factory_disables_autocommit_and_autoflush(fresh_session_module):
+    """SessionLocal must be configured with autocommit=False and autoflush=False
+    so callers retain explicit control over transactions and flush timing —
+    services rely on this when batching writes inside a single request."""
+    session_module.init_db()
+
+    db = session_module.SessionLocal()
+    try:
+        # autoflush=False: a newly added object must NOT be visible to a query
+        # in the same session until we explicitly flush.
+        channel = AudioChannel(name="probe", is_default=False)
+        db.add(channel)
+        # Same-session count via the identity map will see the pending object,
+        # but the underlying DB row count (forced via a flush-bypassing raw
+        # query) should still reflect only the seeded default until we flush.
+        from sqlalchemy import text
+
+        pre_flush = db.execute(text("SELECT COUNT(*) FROM audio_channels")).scalar()
+        assert pre_flush == 1, "autoflush=False — pending insert must not have hit the DB yet"
+
+        db.flush()
+        post_flush = db.execute(text("SELECT COUNT(*) FROM audio_channels")).scalar()
+        assert post_flush == 2
+
+        # autocommit=False: after flush the row is in the DB at the connection
+        # level, but a fresh session on the same engine (which starts its own
+        # transaction) must NOT see it until we commit.
+        other = session_module.SessionLocal()
+        try:
+            visible_to_other = other.query(AudioChannel).filter_by(name="probe").count()
+            assert visible_to_other == 0, (
+                "autocommit=False — uncommitted insert must not be visible to a sibling session"
+            )
+        finally:
+            other.close()
+
+        db.commit()
+        other = session_module.SessionLocal()
+        try:
+            assert other.query(AudioChannel).filter_by(name="probe").count() == 1
+        finally:
+            other.close()
+    finally:
+        db.close()
+
+
+def test_init_db_engine_url_points_at_configured_db_path(fresh_session_module):
+    """The engine must be bound to the sqlite file under config.get_db_path(),
+    not to an in-memory database or some other location — otherwise writes
+    don't survive process restart."""
+    tmp_path = fresh_session_module
+
+    session_module.init_db()
+
+    expected_url = f"sqlite:///{tmp_path / 'voiceit.db'}"
+    assert str(session_module.engine.url) == expected_url
