@@ -203,3 +203,159 @@ pub fn send_paste() -> Result<(), String> {
 pub fn send_paste() -> Result<(), String> {
     Err("synthetic paste is not yet implemented on this platform".into())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Pure-logic tests for `synthetic_keys`.
+    //!
+    //! The macOS and Windows code paths drive real OS input pipelines
+    //! (`CGEventPost` at the HID tap, `SendInput` against the active
+    //! desktop) and must not be exercised from a unit test — they would
+    //! synthesise live keystrokes against whatever happens to be focused
+    //! on the developer's box. What *is* testable on every host:
+    //!
+    //!   1. The Linux stub `send_paste` must hard-fail rather than
+    //!      no-op-succeed, because callers in `main.rs` (`paste_final_text`,
+    //!      `paste_refined_text`) trust an `Ok(())` to mean "Cmd+V / Ctrl+V
+    //!      was queued onto the OS event tap" and follow up with a brief
+    //!      sleep before restoring the clipboard. If the stub ever
+    //!      returned `Ok` the clipboard restore would race the (never-
+    //!      executed) paste, leaving the user with the raw clipboard
+    //!      contents wiped and nothing pasted.
+    //!   2. The macOS FFI constants (`KEYCODE_LEFT_CMD`,
+    //!      `K_CG_EVENT_FLAG_MASK_COMMAND`,
+    //!      `K_CG_HID_EVENT_TAP`,
+    //!      `K_CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE`) are part of
+    //!      Apple's stable ABI — pinning them prevents a typo from
+    //!      silently degrading the paste sequence to "Cmd up, Ctrl+V, ..."
+    //!      or queueing events into the session tap (which user apps
+    //!      can't see) instead of the HID tap.
+    //!   3. The Windows `make_key` helper is the only pure-logic surface
+    //!      on that platform — it must set `INPUT_KEYBOARD`, carry the
+    //!      requested `wVk`, and set `KEYEVENTF_KEYUP` if and only if
+    //!      `up == true`. Anything else and `send_paste` would emit a
+    //!      malformed paste sequence regardless of how `SendInput`
+    //!      behaves.
+    //!
+    //! Per-platform assertions are gated by the same `cfg` blocks the
+    //! production code uses, so they only compile on the platform whose
+    //! invariant they encode. Tarpaulin (Linux) measures coverage on
+    //! the stub branch.
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn send_paste_on_unsupported_platform_returns_explanatory_error() {
+        // The stub exists so the rest of the binary can link on Linux
+        // dev hosts, but it must never appear to succeed. Per the
+        // callers in main.rs, an `Ok` return is taken to mean "the
+        // four-event Cmd+V / Ctrl+V sequence is queued onto the OS
+        // input tap" and the next step (a brief sleep before clipboard
+        // restore) assumes that. Returning Err is what stops
+        // `paste_final_text` cold so the clipboard isn't clobbered for
+        // a paste that never happened.
+        let err = super::send_paste().expect_err("Linux stub must return Err");
+        let lower = err.to_lowercase();
+        assert!(
+            lower.contains("not") && lower.contains("implemented"),
+            "stub error should identify itself as the unimplemented platform stub, got: {err}"
+        );
+        assert!(
+            lower.contains("platform"),
+            "stub error should mention the platform, got: {err}"
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn send_paste_is_deterministic_across_calls_on_the_stub() {
+        // The Linux stub has no internal state; calling it ten times
+        // in a row must produce ten identical errors. If it ever
+        // started returning Ok intermittently (e.g. someone "fixed"
+        // it by adding an early-return), the higher-level paste flow
+        // would race the clipboard restore on the first Ok and the
+        // developer's debugging session would suddenly start losing
+        // clipboard contents at random.
+        let first = super::send_paste().expect_err("first call must Err");
+        for _ in 0..10 {
+            let again = super::send_paste().expect_err("repeat call must Err");
+            assert_eq!(again, first, "stub error must be stable across calls");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_event_tap_constants_match_apples_published_values() {
+        // These four constants are the ABI surface the macOS paste
+        // sequence relies on. Hand-typing them in the `ffi` submodule
+        // is the only place a typo could silently downgrade behaviour
+        // (e.g. posting to the session tap, which user apps can't see,
+        // or stamping the wrong modifier flag), so pin them here.
+        use super::ffi::*;
+        assert_eq!(K_CG_HID_EVENT_TAP, 0, "kCGHIDEventTap is 0");
+        assert_eq!(
+            K_CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE, 1,
+            "kCGEventSourceStateHIDSystemState is 1"
+        );
+        assert_eq!(
+            K_CG_EVENT_FLAG_MASK_COMMAND, 0x00100000,
+            "kCGEventFlagMaskCommand is bit 20"
+        );
+        assert_eq!(KEYCODE_LEFT_CMD, 0x37, "kVK_Command (left Cmd) is 0x37");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn make_key_sets_keyboard_type_and_carries_requested_virtual_key() {
+        // `send_paste` builds the four-event Ctrl+V sequence by handing
+        // each (vk, up) pair to `make_key`. The whole sequence is
+        // garbage if `make_key` ever returns the wrong INPUT type
+        // (mouse vs keyboard) or drops the requested VK, so pin both.
+        use super::win::make_key;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT_KEYBOARD, VK_CONTROL, VK_V,
+        };
+        let down = make_key(VK_CONTROL, false);
+        assert_eq!(down.r#type, INPUT_KEYBOARD, "must be a keyboard INPUT");
+        unsafe {
+            assert_eq!(
+                down.Anonymous.ki.wVk, VK_CONTROL,
+                "must carry the requested virtual key"
+            );
+            assert_eq!(down.Anonymous.ki.wScan, 0, "scan code is unused");
+            assert_eq!(down.Anonymous.ki.time, 0, "time must be zero (system fills)");
+            assert_eq!(down.Anonymous.ki.dwExtraInfo, 0, "no synthetic-tag in extra info");
+        }
+        let v_down = make_key(VK_V, false);
+        unsafe {
+            assert_eq!(v_down.Anonymous.ki.wVk, VK_V);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn make_key_flags_keyup_only_when_up_argument_is_true() {
+        // The four-event paste sequence is Ctrl down, V down, V up,
+        // Ctrl up — half the events need KEYEVENTF_KEYUP set, the
+        // other half need it clear. If `make_key` ever ignored its
+        // `up` argument the target app would receive four key-down
+        // events in a row and Ctrl would stay logically held after
+        // the paste, breaking the next typed character.
+        use super::win::make_key;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL,
+        };
+        let down = make_key(VK_CONTROL, false);
+        let up = make_key(VK_CONTROL, true);
+        unsafe {
+            assert_eq!(
+                down.Anonymous.ki.dwFlags,
+                KEYBD_EVENT_FLAGS(0),
+                "down event must clear KEYEVENTF_KEYUP"
+            );
+            assert_eq!(
+                up.Anonymous.ki.dwFlags, KEYEVENTF_KEYUP,
+                "up event must set KEYEVENTF_KEYUP"
+            );
+        }
+    }
+}
