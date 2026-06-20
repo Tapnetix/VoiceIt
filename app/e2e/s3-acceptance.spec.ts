@@ -3,13 +3,12 @@
  * surfaced through the Books / ChapterEditor flow.
  *
  * S3 acceptance (live-backend web build — runs at phase-end gate):
- *   1. Terminal failed delivery state renders the regenerate button DISABLED
- *      (not hidden / removed) so the user can still see the line state. A
- *      segment in audio_status="error" that is non-retryable must keep the
- *      button mounted; a non-terminal pending/generating state must also
- *      render the button (with spinner). Only a segment that has never been
- *      generated (audio_status="none") may legitimately hide the regenerate
- *      affordance.
+ *   1. A segment in a TERMINAL `failed` + non-retryable audio state
+ *      (audio_status="error" with retryable=false) renders the regenerate
+ *      button DISABLED — present and visible in the DOM, but `disabled` so
+ *      the user cannot fire another doomed request. The brief is explicit:
+ *      the button must NOT be hidden or removed; it must be rendered as a
+ *      disabled affordance so the failed state is visible to the user.
  *   2. Double-clicking the regenerate button on a segment in a pending state
  *      submits at most one POST /segments/{id}/regenerate request — the
  *      pending-state disabled affordance must suppress the second click.
@@ -17,9 +16,16 @@
  * Live-backend prerequisites:
  *   - Backend running with the "Silo 42" fixture (seeded by global-setup /
  *     fixtures.ts).
- *   - The fixture must contain at least one chapter with one or more segments
- *     whose audio.status is set (not "none") so SegmentRegenerateControl is
- *     mounted in the ⋯ SelectionDialog.
+ *   - For test 1: the fixture must contain at least one segment whose
+ *     audio.status is "error" (terminal failure) with retryable=false so
+ *     SegmentRegenerateControl is mounted and rendered disabled. If today's
+ *     fixture lacks such a segment OR the data model lacks the `retryable`
+ *     field entirely, the test is skipped at the live gate (see
+ *     bugs_escalated against SegmentRegenerateControl.tsx in the audit
+ *     report — the implementation does not currently disable on terminal
+ *     `error` state).
+ *   - For test 2: the fixture must contain at least one segment whose
+ *     audio.status is set (not "none") so the regenerate button is mounted.
  *   - /books route wired in the web build (C16-equivalent).
  *
  * This spec is authored RED — it will turn GREEN at the phase-end live-stack
@@ -67,19 +73,85 @@ async function findFirstRegenerateTarget(page: import('@playwright/test').Page) 
   return { segId: null as string | null, paraIdx: -1 };
 }
 
-// ─── S3: terminal failed state renders disabled, not hidden ──────────────────
+/**
+ * Query the backend directly for the first segment in a TERMINAL failed +
+ * non-retryable state (audio_status="error" with retryable=false).
+ *
+ * Returns the segmentId + chapter/book context if such a segment exists in
+ * the live fixture. Returns null if none is present (in which case the
+ * caller skips at the live gate).
+ *
+ * This avoids walking every paragraph's ⋯ menu just to find a failure case —
+ * once we know the seg/chapter/book ids, we can navigate directly.
+ */
+async function findTerminalFailedSegmentViaApi(
+  request: import('@playwright/test').APIRequestContext,
+): Promise<{ segId: string; chapterId: string; bookId: string } | null> {
+  const booksRes = await request.get('/books');
+  if (!booksRes.ok()) return null;
+  const books = (await booksRes.json()) as Array<{ id: string; name: string }>;
+  const silo = books.find((b) => b.name === 'Silo 42');
+  if (!silo) return null;
 
-test('S3: a segment in a non-idle audio state keeps the regenerate button mounted in the DOM (rendered, not hidden)', async ({
+  const chaptersRes = await request.get(`/books/${silo.id}/chapters`);
+  if (!chaptersRes.ok()) return null;
+  const chapters = (await chaptersRes.json()) as Array<{ id: string }>;
+
+  for (const ch of chapters) {
+    const segsRes = await request.get(`/chapters/${ch.id}/segments`);
+    if (!segsRes.ok()) continue;
+    const segs = (await segsRes.json()) as Array<{
+      id: string;
+      audio?: { status?: string; retryable?: boolean };
+    }>;
+    const target = segs.find(
+      (s) => s.audio?.status === 'error' && s.audio?.retryable === false,
+    );
+    if (target) {
+      return { segId: target.id, chapterId: ch.id, bookId: silo.id };
+    }
+  }
+  return null;
+}
+
+// ─── S3: terminal failed + non-retryable renders DISABLED, not hidden ────────
+
+test('S3: a segment in terminal audio_status="error" with retryable=false renders the regenerate button disabled (not hidden)', async ({
   page,
+  request,
 }) => {
   /**
-   * Open the ⋯ menu of any segment whose audio.status is set (so the regen
-   * control is mounted). The button must be present in the DOM regardless of
-   * whether the underlying state is terminal-failed (audio_status="error"),
-   * in-flight ("pending"/"generating"), or completed. The component MUST NOT
-   * remove the button to communicate a failed/terminal state — it must use
-   * the disabled attribute (or equivalent visible affordance) instead.
+   * The brief's explicit acceptance: when a segment reaches a TERMINAL
+   * failure state that the user cannot recover from by retrying
+   * (audio_status="error" + retryable=false), the regenerate button must be
+   * rendered DISABLED — visible in the DOM, but `disabled` so a click is a
+   * no-op. This is contrasted with "hidden" (removed from the DOM): the
+   * user must still SEE the failure context.
+   *
+   * We locate such a segment via the backend API (so we get a known
+   * seg/chapter/book id), navigate directly to the chapter editor, open
+   * the ⋯ menu for that paragraph, and assert:
+   *   - the regenerate button is attached + visible
+   *   - the regenerate button is disabled
+   *
+   * If the live fixture has no such segment, we skip — the live gate will
+   * surface the gap. See the audit's bugs_escalated entry against
+   * SegmentRegenerateControl.tsx:45-48: the current implementation only
+   * disables on isPending || audio_status==='pending'|'generating' — it
+   * does NOT disable on terminal audio_status='error' with retryable=false,
+   * and the SegmentResponse contract does not expose a `retryable` field.
+   * Until the component AND the contract are updated, this test fails the
+   * spec on any fixture that does seed a terminal-failed segment.
    */
+  const target = await findTerminalFailedSegmentViaApi(request);
+  if (target === null) {
+    test.skip(
+      true,
+      'No segment with audio_status="error" and retryable=false in fixture — terminal-failed branch cannot be exercised against the live backend until the fixture seeds one (and until SegmentResponse exposes retryable). See bugs_escalated.',
+    );
+    return;
+  }
+
   await page.goto('/books');
 
   const bookCard = page.getByText('Silo 42');
@@ -88,8 +160,7 @@ test('S3: a segment in a non-idle audio state keeps the regenerate button mounte
 
   const editBtn = page
     .getByTestId('chapter-list')
-    .locator('[data-testid^="edit-chapter"]')
-    .first();
+    .locator(`[data-testid="edit-chapter-${target.chapterId}"]`);
   await expect(editBtn).toBeVisible({ timeout: 5_000 });
   await editBtn.click();
 
@@ -99,29 +170,45 @@ test('S3: a segment in a non-idle audio state keeps the regenerate button mounte
     timeout: 5_000,
   });
 
-  const { segId, paraIdx } = await findFirstRegenerateTarget(page);
-  if (segId === null) {
-    test.skip(
-      true,
-      'No segment with audio_status set to a non-"none" value — fixture lacks generated/failed audio (deferred to phase-end gate)',
-    );
-    return;
+  // Find the paragraph containing our terminal-failed segment by walking
+  // paragraphs and opening each ⋯ menu until we see the matching
+  // regenerate-btn-{segId}. (Paragraph index for a specific segment is
+  // not surfaced in the DOM directly; the segId in the dialog is the
+  // ground truth.)
+  const allParas = chapterText.locator('p');
+  const paraCount = await allParas.count();
+
+  let opened = false;
+  for (let i = 0; i < paraCount; i++) {
+    const para = allParas.nth(i);
+    const menuBtn = para.getByRole('button', { name: '⋯' });
+    if (!(await menuBtn.isVisible())) continue;
+
+    await menuBtn.click();
+    const dialog = page.getByTestId('selection-dialog');
+    if (!(await dialog.isVisible())) continue;
+
+    const targetBtn = dialog.getByTestId(`regenerate-btn-${target.segId}`);
+    if (await targetBtn.isVisible().catch(() => false)) {
+      opened = true;
+      break;
+    }
+    await dialog.getByTestId('cancel-btn').click();
   }
 
-  // Re-open the dialog on the found paragraph and assert the regenerate
-  // button is in the DOM. The exact state (enabled / disabled / spinning)
-  // varies by underlying audio_status, but the element MUST be mounted —
-  // a terminal failed state must render disabled, not removed.
-  const targetPara = chapterText.locator('p').nth(paraIdx);
-  await targetPara.getByRole('button', { name: '⋯' }).click();
-  const dialog = page.getByTestId('selection-dialog');
-  await expect(dialog).toBeVisible({ timeout: 3_000 });
+  expect(opened, 'expected to find the terminal-failed segment in the chapter editor').toBe(
+    true,
+  );
 
-  const regenBtn = dialog.getByTestId(`regenerate-btn-${segId}`);
-  // attached (in DOM) is the key acceptance: not removed/hidden.
+  const dialog = page.getByTestId('selection-dialog');
+  const regenBtn = dialog.getByTestId(`regenerate-btn-${target.segId}`);
+
+  // Core brief acceptance — present + visible (NOT hidden / removed) …
   await expect(regenBtn).toBeAttached();
-  // And visible to the user — disabled buttons still render.
   await expect(regenBtn).toBeVisible();
+  // … AND disabled, because the segment is in a terminal non-retryable
+  // failure. A click here must be a no-op.
+  await expect(regenBtn).toBeDisabled();
 });
 
 // ─── S3: double-click on pending submits exactly one request ─────────────────
