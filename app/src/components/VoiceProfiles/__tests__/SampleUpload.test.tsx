@@ -22,8 +22,8 @@ import { SampleUpload } from '@/components/VoiceProfiles/SampleUpload';
 // ----------------------------------------------------------------------------
 
 // AudioTrimmer stub — exposes a "Use this clip" button and a getClip() ref.
-vi.mock('@/components/AudioTrimmer/AudioTrimmer', () => {
-  const React = require('react');
+vi.mock('@/components/AudioTrimmer/AudioTrimmer', async () => {
+  const React = await import('react');
   return {
     AudioTrimmer: React.forwardRef(
       (

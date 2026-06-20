@@ -28,9 +28,6 @@ function makeItem(overrides: Partial<StoryItemDetail> & {
   return {
     id: `item-${overrides.generation_id}`,
     story_id: 'story-1',
-    generation_id: overrides.generation_id,
-    start_time_ms: overrides.start_time_ms,
-    duration: overrides.duration,
     track: 0,
     trim_start_ms: overrides.trim_start_ms ?? 0,
     trim_end_ms: overrides.trim_end_ms ?? 0,
@@ -248,7 +245,7 @@ describe('ChapterReadAlong — headless playback-to-segment observer', () => {
     const scrollSpy = vi.fn();
     const el = document.createElement('div');
     el.setAttribute('data-testid', 'seg-12');
-    (el as HTMLElement & { scrollIntoView: typeof scrollSpy }).scrollIntoView = scrollSpy;
+    (el as unknown as HTMLElement & { scrollIntoView: typeof scrollSpy }).scrollIntoView = scrollSpy;
     document.body.appendChild(el);
 
     try {

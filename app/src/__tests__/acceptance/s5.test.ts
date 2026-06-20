@@ -153,7 +153,6 @@ function restoreMediaDevices(): void {
   if (originalMediaDevices) {
     Object.defineProperty(navigator, 'mediaDevices', originalMediaDevices);
   } else {
-    // @ts-expect-error — deleting an installed property is fine
     delete (navigator as { mediaDevices?: unknown }).mediaDevices;
   }
 }
@@ -227,7 +226,7 @@ function makePlatform(): Platform {
 
 function wrapperWithPlatform(platform: Platform) {
   return function Wrapper({ children }: { children: React.ReactNode }) {
-    return React.createElement(PlatformProvider, { platform }, children);
+    return React.createElement(PlatformProvider, { platform, children });
   };
 }
 

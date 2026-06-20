@@ -431,7 +431,6 @@ describe('SampleList mini-player', () => {
   beforeEach(() => {
     createdAudios = [];
     originalAudio = window.Audio;
-    // @ts-expect-error — patching the global to record instances.
     window.Audio = function AudioCtor(src?: string) {
       const el = new originalAudio(src);
       createdAudios.push(el);

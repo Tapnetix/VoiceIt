@@ -76,7 +76,6 @@ afterEach(() => {
   if (originalMediaDevices) {
     Object.defineProperty(navigator, 'mediaDevices', originalMediaDevices);
   } else {
-    // @ts-expect-error — delete is fine on the configured property
     delete (navigator as { mediaDevices?: unknown }).mediaDevices;
   }
   vi.restoreAllMocks();

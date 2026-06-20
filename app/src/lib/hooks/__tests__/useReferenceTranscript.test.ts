@@ -1,6 +1,6 @@
 /// <reference types="@testing-library/jest-dom/vitest" />
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 
@@ -108,10 +108,10 @@ describe('useReferenceTranscript — first confirmed clip', () => {
   });
 
   it('exposes isTranscribing while the backend is still working', async () => {
-    let resolveFn: (value: { text: string }) => void = () => {};
+    let resolveFn: (value: { text: string; duration: number }) => void = () => {};
     vi.spyOn(apiClient, 'transcribeAudio').mockImplementation(
       () =>
-        new Promise<{ text: string }>((resolve) => {
+        new Promise<{ text: string; duration: number }>((resolve) => {
           resolveFn = resolve;
         }),
     );
@@ -123,7 +123,7 @@ describe('useReferenceTranscript — first confirmed clip', () => {
     expect(h.result.current.error).toBeNull();
 
     await act(async () => {
-      resolveFn({ text: 'eventually' });
+      resolveFn({ text: 'eventually', duration: 0 });
     });
     await waitFor(() => expect(h.result.current.status).toBe('filled'));
     expect(h.result.current.isTranscribing).toBe(false);

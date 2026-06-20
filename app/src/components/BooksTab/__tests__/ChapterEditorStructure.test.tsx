@@ -19,7 +19,7 @@
 import '@/i18n';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { ChapterEditor } from '@/components/BooksTab/ChapterEditor';
 import { useBooksStore } from '@/stores/booksStore';
 

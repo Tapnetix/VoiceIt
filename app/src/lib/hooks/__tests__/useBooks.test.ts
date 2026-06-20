@@ -131,7 +131,7 @@ function makeWrapper(opts?: { platform?: Platform }) {
   const Wrapper = ({ children }: { children: React.ReactNode }) => {
     const tree = React.createElement(QueryClientProvider, { client: queryClient }, children);
     return platform
-      ? React.createElement(PlatformProvider, { platform }, tree)
+      ? React.createElement(PlatformProvider, { platform, children: tree })
       : tree;
   };
   return { wrapper: Wrapper, queryClient };

@@ -310,7 +310,7 @@ describe('AudioTrimmer', () => {
     );
 
     // Move the engine playhead somewhere else.
-    mockWs.instance!.setTime(50);
+    (mockWs.instance!.setTime as (t: number) => void)(50);
     expect(mockWs.instance!.currentTime).toBe(50);
 
     // Rewind snaps it back to the (new) region start, which is ~134.4s.
@@ -363,7 +363,7 @@ describe('AudioTrimmer', () => {
     fireEvent.click(screen.getByTestId('trimmer-loop'));
     fireEvent.click(screen.getByTestId('trimmer-play'));
     expect(mockWs.instance!.isPlaying()).toBe(true);
-    mockWs.instance!.setTime(10);
+    (mockWs.instance!.setTime as (t: number) => void)(10);
 
     // Crossing the end while looping → seeks back to region.start (0) and stays playing.
     mockWs.fire!('timeupdate', 25);

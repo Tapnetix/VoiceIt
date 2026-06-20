@@ -214,8 +214,8 @@ describe('SampleUpload — AudioTrimmer integration', () => {
 
     // The component must wire a 120s cap into both recorder hooks so users
     // cannot capture clips longer than the model accepts.
-    expect(audioRecordingOpts.at(-1)?.maxDurationSeconds).toBe(120);
-    expect(systemAudioOpts.at(-1)?.maxDurationSeconds).toBe(120);
+    expect(audioRecordingOpts[audioRecordingOpts.length - 1]?.maxDurationSeconds).toBe(120);
+    expect(systemAudioOpts[systemAudioOpts.length - 1]?.maxDurationSeconds).toBe(120);
   });
 
   it('drives transcription off the trimmed clip once the trimmer confirms', async () => {
