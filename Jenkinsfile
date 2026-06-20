@@ -107,6 +107,11 @@ pipeline {
                             just setup-python
                             # `just setup-python` chains through `_ensure-venv`,
                             # which installs pytest + pytest-asyncio + pytest-cov.
+                            # Add the test-only dep mutagen (used by
+                            # test_audiobook_export.py to read ID3 tags off the
+                            # generated .mp3s) — it isn't in requirements.txt
+                            # because no production code imports it.
+                            backend/venv/bin/pip install --quiet mutagen
                             # Run with the audit omit list applied (--cov-config is
                             # mandatory; without it pytest-cov silently ignores the
                             # config under [tool.coverage.run] when invoked from
@@ -163,7 +168,11 @@ PYGATE
             }
         }
 
+        // On tag pushes the Release stage below does the production bundling
+        // with real signing + updater artifacts, so the regression-detection
+        // Build stage is redundant — skip it to halve tag-build wall time.
         stage('Build') {
+            when { not { buildingTag() } }
             failFast false
             parallel {
 
@@ -372,10 +381,394 @@ PYGATE
                 }
             }
         }
+
+        // ─── Release: tag-triggered production bundling ───────────────────
+        //
+        // Fires only on `v*` git tags (e.g. `v0.8.0`). Does production-grade
+        // bundling with real signing + updater artifacts, then publishes a
+        // GitHub Release with assets and CHANGELOG-derived notes.
+        //
+        // ── Prerequisites that must exist before the first tag build ───
+        //
+        // Jenkins credentials (create at $JENKINS_URL/credentials/store/system):
+        //   tauri-signing-key            Secret text  — base64 ed25519 priv key
+        //                                              (matches updater pubkey
+        //                                              in tauri.conf.json's
+        //                                              `plugins.updater.pubkey`)
+        //   tauri-signing-key-pw         Secret text  — password for the key
+        //   apple-api-key-id             Secret text  — App Store Connect API
+        //                                              Key ID (e.g. "ABCD1234")
+        //   apple-api-issuer             Secret text  — Issuer UUID for that key
+        //   apple-api-key-p8             Secret file  — the .p8 private key
+        //   apple-cert-p12               Secret file  — Developer ID cert .p12
+        //   apple-cert-password          Secret text  — password for the .p12
+        //   apple-signing-identity       Secret text  — "Developer ID
+        //                                              Application: <name> (TEAMID)"
+        //   github-release-token         Secret text  — PAT with `contents:write`
+        //                                              on Tapnetix/VoiceIt for
+        //                                              `gh release create`
+        //
+        // Jenkins agents:
+        //   `pockeo-linux`               — existing; .deb + AppImage build
+        //   `macos`                      — existing (mbook); macOS arm64 build
+        //   `pockeo-windows`             — existing; Windows NSIS + CUDA builds
+        //   `macos-intel`                — TO PROVISION: Intel Mac OR Apple
+        //                                  Silicon Mac with the
+        //                                  x86_64-apple-darwin Rust target +
+        //                                  python-pytorch CPU wheel (the
+        //                                  `Release: macOS Intel` branch is
+        //                                  commented out until this lands).
+        //
+        // The Release stage is intentionally NOT trying to use the artifacts
+        // produced by Build: Build runs `ci-disable-updater.py` and ad-hoc
+        // signs on macOS, which makes its bundles unusable for distribution.
+        // The Release branches do their own full builds with real keys.
+        stage('Release') {
+            when { buildingTag() }
+            failFast false
+            parallel {
+
+                // ─── Linux .deb + AppImage with updater ─────────────────
+                stage('Release: Linux') {
+                    agent { label 'pockeo-linux' }
+                    steps {
+                        withCredentials([
+                            string(credentialsId: 'tauri-signing-key',    variable: 'TAURI_SIGNING_PRIVATE_KEY'),
+                            string(credentialsId: 'tauri-signing-key-pw', variable: 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD'),
+                        ]) {
+                            sh '''
+                                set -eu
+                                export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+                                command -v bun  >/dev/null 2>&1 || curl -fsSL https://bun.sh/install | bash
+                                export PATH="$HOME/.bun/bin:$PATH"
+                                command -v just >/dev/null 2>&1 || cargo install just --locked
+                                rustc --version; bun --version; just --version; python3 --version
+
+                                if command -v node >/dev/null 2>&1; then node scripts/check-bundle-icons.mjs; else bun scripts/check-bundle-icons.mjs; fi
+
+                                rm -rf backend/venv
+                                rm -rf tauri/src-tauri/target/*/build/tauri-* tauri/src-tauri/target/*/.fingerprint/tauri-* 2>/dev/null || true
+
+                                just setup
+                                backend/venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu --force-reinstall torch torchaudio
+                                backend/venv/bin/pip freeze | grep -iE '^nvidia[-_]' | cut -d'=' -f1 | xargs -r backend/venv/bin/pip uninstall -y || true
+                                just build-server
+                                # Do NOT run ci-disable-updater.py — we want the
+                                # updater enabled in this build so tauri emits
+                                # the .deb.sig + AppImage.sig + latest.json
+                                # alongside the bundles.
+                                ( cd tauri && bun run tauri build --bundles deb,appimage < /dev/null )
+                            '''
+                        }
+                    }
+                    post {
+                        success {
+                            archiveArtifacts artifacts: 'tauri/src-tauri/target/release/bundle/{deb,appimage}/**',
+                                allowEmptyArchive: false, fingerprint: true
+                            // Stash for the Publish stage to collect across
+                            // agents — archiveArtifacts alone lands them in
+                            // the build's archive, but the Publish stage
+                            // runs on a fresh Linux agent and can't `cp`
+                            // them from this branch's workspace.
+                            stash name: 'release-linux',
+                                includes: 'tauri/src-tauri/target/release/bundle/deb/*.deb, tauri/src-tauri/target/release/bundle/appimage/*.AppImage*'
+                        }
+                        cleanup { sh 'rm -rf tauri/src-tauri/target/release/bundle || true' }
+                    }
+                }
+
+                // ─── macOS arm64 (.dmg) — signed + notarized ───────────
+                stage('Release: macOS arm64') {
+                    agent { label 'macos' }
+                    steps {
+                        withCredentials([
+                            string(credentialsId: 'tauri-signing-key',     variable: 'TAURI_SIGNING_PRIVATE_KEY'),
+                            string(credentialsId: 'tauri-signing-key-pw',  variable: 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD'),
+                            string(credentialsId: 'apple-api-key-id',      variable: 'APPLE_API_KEY_ID'),
+                            string(credentialsId: 'apple-api-issuer',      variable: 'APPLE_API_ISSUER'),
+                            file  (credentialsId: 'apple-api-key-p8',      variable: 'APPLE_API_KEY_P8'),
+                            file  (credentialsId: 'apple-cert-p12',        variable: 'APPLE_CERT_P12'),
+                            string(credentialsId: 'apple-cert-password',   variable: 'APPLE_CERTIFICATE_PASSWORD'),
+                            string(credentialsId: 'apple-signing-identity',variable: 'APPLE_SIGNING_IDENTITY'),
+                        ]) {
+                            sh '''
+                                set -eu
+                                export HOME=/Users/jenkins
+                                export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/Users/jenkins/.nvm/versions/node/v24.14.1/bin:/Users/jenkins/.nvm/versions/node/v24.14.0/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+                                export BUN_INSTALL="$HOME/.bun"
+                                command -v bun >/dev/null 2>&1 || curl -fsSL https://bun.sh/install | bash
+                                export PATH="$BUN_INSTALL/bin:$PATH"
+                                uv --version; rustc --version; bun --version
+
+                                node scripts/check-bundle-icons.mjs
+
+                                rm -rf backend/venv
+                                uv venv --python 3.12 --seed backend/venv
+                                backend/venv/bin/python -m pip install --upgrade pip
+                                backend/venv/bin/pip install -r backend/requirements.txt
+                                backend/venv/bin/pip install -r backend/requirements-mlx.txt
+                                backend/venv/bin/pip install --no-deps mlx-lm==0.31.1
+                                backend/venv/bin/pip install --no-deps mlx-audio==0.4.1
+                                bun install
+                                ./scripts/build-server.sh
+                                # Keep updater enabled — no ci-disable-updater.py here.
+                                rm -rf tauri/src-tauri/target/*/build/tauri-* tauri/src-tauri/target/*/.fingerprint/tauri-* 2>/dev/null || true
+
+                                # Stage the App Store Connect API key for notarytool.
+                                mkdir -p "$HOME/.appstoreconnect/private_keys"
+                                cp "$APPLE_API_KEY_P8" "$HOME/.appstoreconnect/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+
+                                # Import the Developer ID signing cert into a fresh keychain
+                                # so the build can codesign without an interactive prompt.
+                                KC="$HOME/Library/Keychains/voiceit-build.keychain-db"
+                                rm -f "$KC"
+                                security create-keychain -p "" "$KC"
+                                security default-keychain -s "$KC"
+                                security unlock-keychain -p "" "$KC"
+                                security set-keychain-settings -t 3600 -u "$KC"
+                                security import "$APPLE_CERT_P12" -k "$KC" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
+                                security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "" "$KC" >/dev/null
+
+                                ( cd tauri && bun run tauri build --bundles dmg --target aarch64-apple-darwin < /dev/null )
+
+                                # Tauri signs the .app with Developer ID and bundles it into the
+                                # .dmg, but the .dmg wrapper itself ships unnotarized. Submit it
+                                # to notarytool, staple, and verify.
+                                DMG_DIR="tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg"
+                                shopt -s nullglob
+                                dmgs=("${DMG_DIR}"/*.dmg)
+                                if [ ${#dmgs[@]} -eq 0 ]; then
+                                    echo "::error::No DMGs found in ${DMG_DIR}"
+                                    exit 1
+                                fi
+                                for dmg in "${dmgs[@]}"; do
+                                    echo "=== Notarize $(basename "$dmg") ==="
+                                    xcrun notarytool submit "$dmg" \
+                                        --key   "$HOME/.appstoreconnect/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8" \
+                                        --key-id "$APPLE_API_KEY_ID" \
+                                        --issuer "$APPLE_API_ISSUER" \
+                                        --wait --timeout 20m
+                                    xcrun stapler staple "$dmg"
+                                    spctl -a -t open --context context:primary-signature -vv "$dmg"
+                                done
+                            '''
+                        }
+                    }
+                    post {
+                        success {
+                            archiveArtifacts artifacts: 'tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg, tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz*',
+                                allowEmptyArchive: true, fingerprint: true
+                            stash name: 'release-macos-arm64',
+                                includes: 'tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg, tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz*'
+                        }
+                        cleanup {
+                            sh '''
+                                rm -rf tauri/src-tauri/target/aarch64-apple-darwin/release/bundle || true
+                                security delete-keychain "$HOME/Library/Keychains/voiceit-build.keychain-db" 2>/dev/null || true
+                            '''
+                        }
+                    }
+                }
+
+                // ─── macOS Intel (.dmg) — signed + notarized ────────────
+                //
+                // TODO: enable once a `macos-intel` agent is provisioned.
+                // The branch is structurally identical to `Release: macOS arm64`
+                // with --target x86_64-apple-darwin and the pytorch backend
+                // (no MLX). Leaving commented prevents NodeUnavailable from
+                // failing every tag build until the agent exists.
+                //
+                // stage('Release: macOS Intel') {
+                //     agent { label 'macos-intel' }
+                //     steps { ... }
+                // }
+
+                // ─── Windows NSIS .exe + updater ────────────────────────
+                stage('Release: Windows NSIS') {
+                    agent { label 'pockeo-windows' }
+                    options { retry(count: 2, conditions: [agent(), nonresumable()]) }
+                    steps {
+                        checkout scm
+                        withCredentials([
+                            string(credentialsId: 'tauri-signing-key',    variable: 'TAURI_SIGNING_PRIVATE_KEY'),
+                            string(credentialsId: 'tauri-signing-key-pw', variable: 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD'),
+                        ]) {
+                            bat '''
+                                set "PATH=%USERPROFILE%\\.local\\bin;%USERPROFILE%\\.cargo\\bin;%USERPROFILE%\\.bun\\bin;C:\\Program Files\\Git\\bin;C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\nodejs;C:\\Strawberry\\perl\\bin;C:\\LLVM\\bin;%PATH%"
+                                uv --version || exit /b 1
+                                bun --version || exit /b 1
+                                rustc --version || exit /b 1
+
+                                if exist backend\\venv rmdir /S /Q backend\\venv
+                                uv venv --python 3.12 --seed backend\\venv || exit /b 1
+                                backend\\venv\\Scripts\\python.exe -m pip install --upgrade pip || exit /b 1
+                                backend\\venv\\Scripts\\pip.exe install -r backend\\requirements.txt || exit /b 1
+                                backend\\venv\\Scripts\\pip.exe install pyinstaller || exit /b 1
+                                backend\\venv\\Scripts\\pip.exe install --index-url https://download.pytorch.org/whl/cpu --force-reinstall torch torchaudio || exit /b 1
+                                call bun install || exit /b 1
+                                REM Do NOT run ci-disable-updater.py — release artifacts include
+                                REM the NSIS .exe.sig and latest.json for the updater feed.
+
+                                set "PATH=%CD%\\backend\\venv\\Scripts;%PATH%"
+                                python backend\\build_binary.py || exit /b 1
+                                for /f "delims=" %%i in ('rustc --print host-tuple') do set "TRIPLE=%%i"
+                                if not exist tauri\\src-tauri\\binaries mkdir tauri\\src-tauri\\binaries
+                                copy /Y backend\\dist\\voiceit-server.exe "tauri\\src-tauri\\binaries\\voiceit-server-%TRIPLE%.exe" || exit /b 1
+                                python backend\\build_binary.py --shim || exit /b 1
+                                copy /Y backend\\dist\\voiceit-mcp.exe "tauri\\src-tauri\\binaries\\voiceit-mcp-%TRIPLE%.exe" || exit /b 1
+
+                                if exist tauri\\src-tauri\\target\\release\\build rmdir /S /Q tauri\\src-tauri\\target\\release\\build
+                                if exist tauri\\src-tauri\\target\\release\\.fingerprint rmdir /S /Q tauri\\src-tauri\\target\\release\\.fingerprint
+
+                                cd tauri || exit /b 1
+                                call bun run tauri build --bundles nsis || exit /b 1
+                            '''
+                        }
+                    }
+                    post {
+                        success {
+                            archiveArtifacts artifacts: 'tauri/src-tauri/target/release/bundle/nsis/*',
+                                allowEmptyArchive: false, fingerprint: true
+                            stash name: 'release-windows-nsis',
+                                includes: 'tauri/src-tauri/target/release/bundle/nsis/*.exe, tauri/src-tauri/target/release/bundle/nsis/*.exe.sig, tauri/src-tauri/target/release/bundle/nsis/latest.json'
+                        }
+                        cleanup {
+                            bat 'if exist tauri\\src-tauri\\target\\release\\bundle rmdir /S /Q tauri\\src-tauri\\target\\release\\bundle'
+                        }
+                    }
+                }
+
+                // ─── Windows CUDA server tarballs ────────────────────────
+                //
+                // Builds the separate voiceit-server-cuda PyInstaller onedir,
+                // packages it + the cu128 library set into tarballs that the
+                // installed app downloads on demand from the GH Release.
+                // Reuses the regular `pockeo-windows` agent — no CUDA hardware
+                // needed for the build (torch+cu128 wheels carry the libs).
+                stage('Release: Windows CUDA') {
+                    agent { label 'pockeo-windows' }
+                    options { retry(count: 2, conditions: [agent(), nonresumable()]) }
+                    steps {
+                        checkout scm
+                        bat '''
+                            set "PATH=%USERPROFILE%\\.local\\bin;%USERPROFILE%\\.cargo\\bin;%USERPROFILE%\\.bun\\bin;C:\\Program Files\\Git\\bin;C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\nodejs;%PATH%"
+                            uv --version || exit /b 1
+                            python --version || exit /b 1
+
+                            if exist backend\\venv-cuda rmdir /S /Q backend\\venv-cuda
+                            uv venv --python 3.12 --seed backend\\venv-cuda || exit /b 1
+                            backend\\venv-cuda\\Scripts\\python.exe -m pip install --upgrade pip || exit /b 1
+                            backend\\venv-cuda\\Scripts\\pip.exe install pyinstaller || exit /b 1
+                            backend\\venv-cuda\\Scripts\\pip.exe install -r backend\\requirements.txt || exit /b 1
+                            REM CUDA wheels:
+                            backend\\venv-cuda\\Scripts\\pip.exe install torch      --index-url https://download.pytorch.org/whl/cu128 --force-reinstall --no-deps || exit /b 1
+                            backend\\venv-cuda\\Scripts\\pip.exe install torchaudio --index-url https://download.pytorch.org/whl/cu128 --force-reinstall --no-deps || exit /b 1
+                            backend\\venv-cuda\\Scripts\\python.exe -c "import torch; print('CUDA build:', torch.version.cuda)" || exit /b 1
+
+                            cd backend || exit /b 1
+                            set "TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0;12.0+PTX"
+                            ..\\backend\\venv-cuda\\Scripts\\python.exe build_binary.py --cuda || exit /b 1
+                            cd .. || exit /b 1
+
+                            backend\\venv-cuda\\Scripts\\python.exe scripts\\package_cuda.py ^
+                                backend\\dist\\voiceit-server-cuda\\ ^
+                                --output release-assets\\ ^
+                                --cuda-libs-version cu128-v1 ^
+                                --torch-compat ">=2.7.0,<2.11.0" || exit /b 1
+                        '''
+                    }
+                    post {
+                        success {
+                            archiveArtifacts artifacts: 'release-assets/voiceit-server-cuda.tar.gz, release-assets/voiceit-server-cuda.tar.gz.sha256, release-assets/cuda-libs-cu128-v1.tar.gz, release-assets/cuda-libs-cu128-v1.tar.gz.sha256, release-assets/cuda-libs.json',
+                                allowEmptyArchive: false, fingerprint: true
+                            stash name: 'release-windows-cuda',
+                                includes: 'release-assets/*'
+                        }
+                        cleanup {
+                            bat '''
+                                if exist backend\\venv-cuda rmdir /S /Q backend\\venv-cuda
+                                if exist backend\\dist\\voiceit-server-cuda rmdir /S /Q backend\\dist\\voiceit-server-cuda
+                                if exist release-assets rmdir /S /Q release-assets
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── Publish: collect stashes and create the GitHub Release ───
+        //
+        // Runs after all Release branches finish. Unstashes the artifacts
+        // produced by each parallel branch onto a fresh pockeo-linux
+        // workspace, extracts the CHANGELOG section for $TAG_NAME, and
+        // creates a DRAFT GitHub Release with `gh release create`. Draft,
+        // not published — a human eyeballs assets + notes and hits Publish.
+        stage('Publish to GitHub') {
+            when { buildingTag() }
+            agent { label 'pockeo-linux' }
+            steps {
+                withCredentials([string(credentialsId: 'github-release-token', variable: 'GH_TOKEN')]) {
+                    sh '''
+                        set -eu
+                        export PATH="$HOME/.local/bin:$PATH"
+                        if ! command -v gh >/dev/null 2>&1; then
+                            # Bootstrap a local gh into ~/.local/bin (idempotent;
+                            # binary persists across builds in the agent home).
+                            mkdir -p "$HOME/.local/bin"
+                            TMP=$(mktemp -d)
+                            curl -fsSL https://github.com/cli/cli/releases/download/v2.65.0/gh_2.65.0_linux_amd64.tar.gz \
+                                -o "$TMP/gh.tar.gz"
+                            tar -xzf "$TMP/gh.tar.gz" -C "$TMP"
+                            cp "$TMP"/gh_*/bin/gh "$HOME/.local/bin/"
+                            rm -rf "$TMP"
+                        fi
+                        gh --version | head -1
+
+                        VERSION="${TAG_NAME#v}"
+                        # Extract this version's CHANGELOG section. Pattern
+                        # mirrors .github/workflows/release.yml — match from
+                        # "## [X.Y.Z]" up to the next "## [" heading and strip
+                        # the heading lines themselves.
+                        NOTES=$(sed -n "/^## \\[${VERSION}\\]/,/^## \\[/{/^## \\[${VERSION}\\]/d;/^## \\[/d;p;}" CHANGELOG.md)
+                        if [ -z "$(printf %s "$NOTES" | tr -d '[:space:]')" ]; then
+                            NOTES="See the assets below to download and install this version."
+                        fi
+                        printf '%s\n' "$NOTES" > /tmp/release-notes.md
+                    '''
+                    // Pull in the per-platform artifact bundles. unstash drops
+                    // them at their original workspace paths.
+                    unstash 'release-linux'
+                    unstash 'release-macos-arm64'
+                    unstash 'release-windows-nsis'
+                    unstash 'release-windows-cuda'
+                    sh '''
+                        set -eu
+                        export PATH="$HOME/.local/bin:$PATH"
+                        rm -rf release-stage; mkdir -p release-stage
+                        # Flatten the per-platform paths into a single dir to
+                        # pass to `gh release create`.
+                        find tauri/src-tauri/target/release/bundle/deb           -name '*.deb'       -exec cp -v {} release-stage/ \\; 2>/dev/null || true
+                        find tauri/src-tauri/target/release/bundle/appimage      -name '*.AppImage*' -exec cp -v {} release-stage/ \\; 2>/dev/null || true
+                        find tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg   -name '*.dmg'    -exec cp -v {} release-stage/ \\; 2>/dev/null || true
+                        find tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos -name '*.tar.gz*' -exec cp -v {} release-stage/ \\; 2>/dev/null || true
+                        find tauri/src-tauri/target/release/bundle/nsis          -type f -exec cp -v {} release-stage/ \\; 2>/dev/null || true
+                        find release-assets                                      -type f -exec cp -v {} release-stage/ \\; 2>/dev/null || true
+                        ls -la release-stage/
+
+                        gh release create "$TAG_NAME" \
+                            --repo Tapnetix/VoiceIt \
+                            --title "VoiceIt $TAG_NAME" \
+                            --notes-file /tmp/release-notes.md \
+                            --draft \
+                            release-stage/*
+                    '''
+                }
+            }
+        }
     }
 
     post {
-        success { echo 'VoiceIt desktop bundles built (Linux .deb, macOS .dmg, Windows NSIS).' }
+        success { echo 'VoiceIt build complete — see archived artifacts above.' }
         failure { echo 'Build failed — see the per-platform stage logs above.' }
     }
 }
