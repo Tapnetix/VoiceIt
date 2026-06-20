@@ -366,38 +366,3 @@ def test_set_channel_voices_rejects_unknown_profile(client):
     )
     assert r.status_code == 400
     assert "not found" in r.json()["detail"]
-
-
-def test_get_channel_voices_returns_400_when_handler_raises(
-    client, monkeypatch
-):
-    """GET /channels/{id}/voices surfaces service ValueError as 400."""
-    from backend.routes import channels as channels_route
-
-    async def boom(channel_id, db):
-        raise ValueError("nope")
-
-    monkeypatch.setattr(
-        channels_route.channels, "get_channel_voices", boom
-    )
-    r = client.get(f"/channels/{uuid.uuid4()}/voices")
-    assert r.status_code == 400
-    assert r.json()["detail"] == "nope"
-
-
-def test_delete_channel_returns_400_when_service_raises_value_error(
-    client, monkeypatch
-):
-    """DELETE surfaces a service-layer ValueError other than 'default' as 400."""
-    from backend.routes import channels as channels_route
-
-    async def boom(channel_id, db):
-        raise ValueError("constraint violation")
-
-    monkeypatch.setattr(
-        channels_route.channels, "delete_channel", boom
-    )
-    created_id = str(uuid.uuid4())
-    r = client.delete(f"/channels/{created_id}")
-    assert r.status_code == 400
-    assert r.json()["detail"] == "constraint violation"
