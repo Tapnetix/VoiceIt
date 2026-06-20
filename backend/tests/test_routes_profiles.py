@@ -1,12 +1,15 @@
 """Tests for the /profiles router (U-py-012).
 
 Spins up a minimal FastAPI app with only the profiles router and a temp
-SQLite DB. No first-party services are mocked except the personality
-``compose_as_profile`` (which would otherwise reach an LLM backend), and
-the audio-validation path used when adding samples (the validator pulls
-in librosa decoder code that doesn't always play well with the synthetic
-tone WAV we feed it — we stub the validator with a real numpy waveform so
-``save_audio`` still runs).
+SQLite DB. No first-party services are mocked. The two external boundaries
+we stub are:
+
+- ``llm_service.get_llm_model`` — replaced with a stub backend (matching the
+  ``LLMBackend`` protocol) so the real ``personality.compose_as_profile`` and
+  ``_require_personality`` execute end-to-end without downloading Qwen weights.
+- ``profiles_service.validate_and_load_reference_audio`` — replaced with a
+  synthetic numpy waveform so ``save_audio`` runs without invoking librosa's
+  decoder on our in-memory sine-wave WAVs.
 
 Coverage target: raise ``backend/routes/profiles.py`` from 0% to >= 80%.
 """
@@ -44,7 +47,6 @@ from backend.database import (
     get_db,
 )
 from backend.routes.profiles import router as profiles_router
-from backend.services.personality import PersonalityResult
 
 
 # ---------------------------------------------------------------------------
@@ -893,38 +895,94 @@ def test_compose_returns_404_when_profile_missing(client):
     assert r.status_code == 404
 
 
-def test_compose_returns_text_when_personality_set(client, TestSession, monkeypatch):
-    """A profile with personality returns the composed text + model size."""
+class _StubLLMBackend:
+    """Minimal stub matching the ``LLMBackend`` protocol surface used by
+    ``personality.compose_as_profile``.
+
+    Records the system prompt and user prompt actually sent so tests can
+    assert that the real ``_build_system_prompt`` ran and embedded the
+    profile's personality text.
+    """
+
+    def __init__(self, *, reply: str = "A wise word.", model_size: str = "1.7B"):
+        self._reply = reply
+        self.model_size = model_size
+        self.calls: list[dict] = []
+
+    async def generate(
+        self,
+        prompt,
+        system=None,
+        max_tokens=512,
+        temperature=0.7,
+        model_size=None,
+        examples=None,
+    ):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "system": system,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "model_size": model_size,
+            }
+        )
+        return self._reply
+
+
+def test_compose_returns_text_when_personality_set(client, monkeypatch):
+    """A profile with personality returns the composed text + model size.
+
+    Mocks only the external LLM boundary (``llm_service.get_llm_model``);
+    the real ``personality.compose_as_profile`` and ``_require_personality``
+    run, building the system prompt and invoking the stub backend.
+    """
     pid = client.post(
         "/profiles",
         json={"name": "Composer", "personality": "a wise sage"},
     ).json()["id"]
 
-    from backend.routes import profiles as profiles_route
+    stub = _StubLLMBackend(reply="  A wise word.  ", model_size="1.7B")
 
-    async def fake_compose(personality, model_size=None):
-        return PersonalityResult(text="A wise word.", model_size="1.7B")
+    from backend.services import llm as llm_service
 
-    monkeypatch.setattr(profiles_route.personality, "compose_as_profile", fake_compose)
+    monkeypatch.setattr(llm_service, "get_llm_model", lambda: stub)
 
     r = client.post(f"/profiles/{pid}/compose")
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     body = r.json()
+    # The real compose_as_profile strips the backend's output.
     assert body["text"] == "A wise word."
+    # The real compose_as_profile falls back to backend.model_size when
+    # caller does not pass model_size.
     assert body["model_size"] == "1.7B"
+
+    # The real _build_system_prompt embedded the profile's personality
+    # into the system message, and the real compose_as_profile sent the
+    # compose trigger as the user turn.
+    assert len(stub.calls) == 1
+    call = stub.calls[0]
+    assert call["prompt"] == "Speak."
+    assert "a wise sage" in call["system"]
+    assert "Character description" in call["system"]
 
 
 def test_compose_returns_400_when_personality_missing(client, monkeypatch):
-    """Profile without personality surfaces ValueError as 400."""
+    """Profile without personality surfaces ValueError as 400.
+
+    Exercises the real ``_require_personality`` guard inside
+    ``compose_as_profile`` — the stub LLM backend should never be called.
+    """
     pid = client.post("/profiles", json={"name": "NoPers"}).json()["id"]
 
-    from backend.routes import profiles as profiles_route
+    stub = _StubLLMBackend()
 
-    async def boom(personality, model_size=None):
-        raise ValueError("This profile has no personality set")
+    from backend.services import llm as llm_service
 
-    monkeypatch.setattr(profiles_route.personality, "compose_as_profile", boom)
+    monkeypatch.setattr(llm_service, "get_llm_model", lambda: stub)
 
     r = client.post(f"/profiles/{pid}/compose")
     assert r.status_code == 400
     assert "no personality" in r.json()["detail"]
+    # The real guard ran before the backend was reached.
+    assert stub.calls == []
