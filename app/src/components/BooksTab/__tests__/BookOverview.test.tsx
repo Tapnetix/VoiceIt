@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, within, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { BookOverview } from '@/components/BooksTab/BookOverview';
+import { Toaster } from '@/components/ui/toaster';
 import { useBooksStore } from '@/stores/booksStore';
 
 // ─── HTTP boundary mock ───────────────────────────────────────────────────────
@@ -500,6 +501,208 @@ describe('BookOverview', () => {
     // While the mutation is pending the button must be disabled.
     await waitFor(() => {
       expect(btn1).toBeDisabled();
+    });
+  });
+
+  // ── Selection toggle off (deselect path) ─────────────────────────────────
+  it('clicking a selected character checkbox a second time deselects it', async () => {
+    await renderOverview();
+    const roster = await screen.findByTestId('cast-roster');
+    let checkboxes: HTMLInputElement[] = [];
+    await waitFor(() => {
+      checkboxes = within(roster).getAllByRole('checkbox') as HTMLInputElement[];
+      expect(checkboxes.length).toBeGreaterThanOrEqual(1);
+    });
+    // First click: selects → delete-btn enables.
+    fireEvent.click(checkboxes[0]);
+    expect(screen.getByTestId('delete-btn')).not.toBeDisabled();
+    // Second click: deselects → delete-btn disabled again, checkbox unchecked.
+    fireEvent.click(checkboxes[0]);
+    await waitFor(() => {
+      expect(screen.getByTestId('delete-btn')).toBeDisabled();
+    });
+    const cbs = within(roster).getAllByRole('checkbox') as HTMLInputElement[];
+    for (const cb of cbs) {
+      expect(cb).not.toBeChecked();
+    }
+  });
+
+  // ── Confidence label branches (high/medium/low) ──────────────────────────
+  it('renders a "low" confidence badge for a character with score < 0.5', async () => {
+    apiState.characters = [
+      defaultCharacters[0], // Narrator
+      {
+        ...defaultCharacters[1],
+        id: 'lowc',
+        name: 'Whisper',
+        confidence: 0.1,
+      },
+    ];
+    await renderOverview();
+    const card = await screen.findByTestId('char-card-lowc');
+    // Outcome: visible "low" confidence badge rendered for the character.
+    expect(within(card).getByText('low')).toBeInTheDocument();
+  });
+
+  it('renders a "medium" confidence badge for a character with 0.5 <= score < 0.8', async () => {
+    apiState.characters = [
+      defaultCharacters[0],
+      {
+        ...defaultCharacters[1],
+        id: 'medc',
+        name: 'Echo',
+        confidence: 0.6,
+      },
+    ];
+    await renderOverview();
+    const card = await screen.findByTestId('char-card-medc');
+    expect(within(card).getByText('medium')).toBeInTheDocument();
+  });
+
+  // ── Voice assignment affordance ──────────────────────────────────────────
+  it('renders an "assign voice" CTA when a non-narrator character has no voice', async () => {
+    apiState.characters = [
+      defaultCharacters[0],
+      {
+        ...defaultCharacters[1],
+        id: 'nov',
+        name: 'Silent',
+        voice_type: undefined,
+        voice_label: undefined,
+      },
+    ];
+    await renderOverview();
+    const assignBtn = await screen.findByTestId('assign-voice-nov');
+    // Outcome: button shows the "Assign voice" CTA label rather than a voice name.
+    expect(within(assignBtn).getByText(/assign voice/i)).toBeInTheDocument();
+  });
+
+  it('renders the assigned voice label when the character has a voice_label', async () => {
+    apiState.characters = [
+      defaultCharacters[0],
+      {
+        ...defaultCharacters[1],
+        id: 'voicedc',
+        name: 'Spoken',
+        voice_label: 'Brian (warm)',
+        voice_type: 'designed',
+      },
+    ];
+    await renderOverview();
+    const assignBtn = await screen.findByTestId('assign-voice-voicedc');
+    expect(within(assignBtn).getByText('Brian (warm)')).toBeInTheDocument();
+  });
+
+  it('clicking the assign-voice button navigates to voice-editor for that character', async () => {
+    await renderOverview();
+    const assignBtn = await screen.findByTestId('assign-voice-m');
+    fireEvent.click(assignBtn);
+    await waitFor(() => {
+      const state = useBooksStore.getState();
+      expect(state.view).toBe('voice-editor');
+      expect(state.selectedCharacterId).toBe('m');
+    });
+  });
+
+  // ── No-book null render path ─────────────────────────────────────────────
+  it('renders nothing when the book query returns null/undefined', async () => {
+    // Clear the primed selectedBookId; useBook(null) returns {data:undefined,isLoading:false}
+    useBooksStore.getState().setSelectedBookId(null);
+    const { container } = render(wrap(<BookOverview />));
+    // Outcome: no book-header is ever rendered (component returned null).
+    await waitFor(() => {
+      expect(screen.queryByTestId('book-header')).not.toBeInTheDocument();
+    });
+    // And the QueryClientProvider rendered no DOM content (BookOverview returned null).
+    expect(container.textContent).toBe('');
+  });
+
+  // ── Generate error paths (toast surfaces) ────────────────────────────────
+  it('shows an "already generating" toast when the generate request fails with 409', async () => {
+    apiState.generateChapterImpl = async () => {
+      throw new Error('HTTP error! status: 409');
+    };
+    render(
+      wrap(
+        <>
+          <BookOverview />
+          <Toaster />
+        </>,
+      ),
+    );
+    await screen.findByTestId('book-header');
+    fireEvent.click(screen.getByTestId('generate-chapter-1'));
+
+    // Outcome 1: a toast with the "already generating" title appears in the DOM.
+    await waitFor(() => {
+      expect(screen.getByText(/already generating/i)).toBeInTheDocument();
+    });
+    // Outcome 2: the button re-enables (in-flight set cleared by the error path).
+    await waitFor(() => {
+      expect(screen.getByTestId('generate-chapter-1')).not.toBeDisabled();
+    });
+  });
+
+  it('shows a generic "generate failed" toast when the generate request fails with a non-409 error', async () => {
+    apiState.generateChapterImpl = async () => {
+      throw new Error('HTTP error! status: 500');
+    };
+    render(
+      wrap(
+        <>
+          <BookOverview />
+          <Toaster />
+        </>,
+      ),
+    );
+    await screen.findByTestId('book-header');
+    fireEvent.click(screen.getByTestId('generate-chapter-1'));
+
+    // Outcome: a toast with the failure title + the underlying error message appears.
+    await waitFor(() => {
+      expect(screen.getByText(/generate failed/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/status:\s*500/)).toBeInTheDocument();
+  });
+
+  // ── SSE + chapter row state derivations ──────────────────────────────────
+  it('shows a play indicator when a chapter receives generation_complete', async () => {
+    await renderOverview();
+    act(() => {
+      mockProgressHandlers.onGenerationComplete?.({
+        type: 'generation_complete',
+        chapter_id: 'c1',
+      });
+    });
+    await waitFor(() => {
+      // The aria-label exposes a "play" affordance for the first chapter row.
+      expect(screen.getByLabelText('play-chapter-1')).toBeInTheDocument();
+    });
+  });
+
+  it('shows a retry control when generation_progress reports errors > 0', async () => {
+    await renderOverview();
+    act(() => {
+      mockProgressHandlers.onGenerationProgress?.({
+        type: 'generation_progress',
+        chapter_id: 'c1',
+        completed: 1,
+        errors: 2,
+        total: 3,
+        overall_progress: 0.33,
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('retry-chapter-1')).toBeInTheDocument();
+    });
+    // Clicking retry issues another generate request for that chapter.
+    fireEvent.click(screen.getByTestId('retry-chapter-1'));
+    await waitFor(() => {
+      expect(generateCalls.length).toBeGreaterThanOrEqual(1);
+    });
+    expect(generateCalls[generateCalls.length - 1]).toMatchObject({
+      bookId: 'b1',
+      chapterId: 'c1',
     });
   });
 });
