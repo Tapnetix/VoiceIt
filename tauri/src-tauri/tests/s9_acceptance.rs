@@ -225,3 +225,56 @@ fn s9_unknown_names_are_rejected_so_chord_builds_fail_loudly() {
         );
     }
 }
+
+#[test]
+fn s9_realistic_captured_chord_resolves_to_the_expected_keytap_set() {
+    // S9.f — End-to-end on a chord shape the frontend actually emits.
+    // The default push-to-talk chord on macOS is right-Meta + right-Alt
+    // (per the user-facing capture flow); a Windows user might bind
+    // left-Control + Shift + KeyA. Both shapes are exercised here:
+    // for each captured chord, every member resolves through
+    // `key_from_str`, the resulting set has the right cardinality
+    // (no member silently collapsed into another), and the variants
+    // are exactly the ones the chord engine expects to match against.
+    let captured_chords: &[(&str, &[&str], &[Key])] = &[
+        (
+            "macOS default push-to-talk",
+            &["MetaRight", "AltRight"],
+            &[Key::MetaRight, Key::AltRight],
+        ),
+        (
+            "Windows custom toggle",
+            &["ControlLeft", "ShiftLeft", "KeyA"],
+            &[Key::ControlLeft, Key::ShiftLeft, Key::A],
+        ),
+        (
+            "legacy capture_settings row",
+            &["Alt", "Return"],
+            &[Key::AltLeft, Key::Enter],
+        ),
+    ];
+
+    for (label, captured, expected) in captured_chords {
+        let resolved: Vec<Key> = captured
+            .iter()
+            .map(|name| {
+                key_from_str(name).unwrap_or_else(|| {
+                    panic!("[{label}] member {name:?} must resolve to a keytap::Key")
+                })
+            })
+            .collect();
+
+        let resolved_set: HashSet<Key> = resolved.iter().copied().collect();
+        assert_eq!(
+            resolved_set.len(),
+            captured.len(),
+            "[{label}] captured chord members must each resolve to a distinct keytap::Key"
+        );
+
+        let expected_set: HashSet<Key> = expected.iter().copied().collect();
+        assert_eq!(
+            resolved_set, expected_set,
+            "[{label}] resolved chord {resolved_set:?} must equal expected {expected_set:?}"
+        );
+    }
+}
