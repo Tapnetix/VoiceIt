@@ -278,3 +278,43 @@ fn s9_realistic_captured_chord_resolves_to_the_expected_keytap_set() {
         );
     }
 }
+
+#[test]
+fn s9_canonical_table_is_a_set_with_no_accidental_duplicate_rows() {
+    // S9.g — Hygiene on the fixture itself. If `canonical_table()` were
+    // to gain a duplicate row (e.g. two `"ArrowUp"` entries via a sloppy
+    // rebase), every other scenario in this file would still pass even
+    // though the table no longer reflects the on-disk contract — totality
+    // would trivially hold on duplicates, injectivity would still hold
+    // because the duplicated name maps to the same Key, and the realistic
+    // chord scenario doesn't iterate the table at all. Verify uniqueness
+    // explicitly so the fixture remains a faithful mirror of the canonical
+    // arms in `src/key_codes.rs`.
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut duplicates: Vec<&str> = Vec::new();
+    for name in canonical_table() {
+        if !seen.insert(name) {
+            duplicates.push(name);
+        }
+    }
+
+    assert!(
+        duplicates.is_empty(),
+        "canonical_table() has duplicate rows: {duplicates:?} — the fixture must be a set"
+    );
+
+    // And the legacy alias table must not list any name that's already
+    // canonical, otherwise the two tables disagree about which form is
+    // the modern one.
+    let canonical_set: HashSet<&str> = canonical_table().iter().copied().collect();
+    let alias_overlaps: Vec<&str> = legacy_aliases()
+        .iter()
+        .filter(|(legacy, _)| canonical_set.contains(legacy))
+        .map(|(legacy, _)| *legacy)
+        .collect();
+
+    assert!(
+        alias_overlaps.is_empty(),
+        "legacy_aliases() contains entries that are already canonical: {alias_overlaps:?}"
+    );
+}
