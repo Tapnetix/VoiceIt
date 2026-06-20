@@ -554,6 +554,30 @@ def test_apply_effects_uses_source_version_when_provided(app_ctx):
     assert body["is_default"] is False
 
 
+def test_apply_effects_default_updates_generation_audio_path(app_ctx):
+    """set_as_default=True must point the parent generation at the new audio."""
+    gen_id, _ = _make_generation(app_ctx, status="completed")
+
+    r = app_ctx["client"].post(
+        f"/generations/{gen_id}/versions/apply-effects",
+        json={
+            "effects_chain": [
+                {"type": "gain", "enabled": True, "params": {"gain_db": 0.5}}
+            ],
+            "set_as_default": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    new_audio_path = r.json()["audio_path"]
+
+    db = app_ctx["TestSession"]()
+    try:
+        gen = db.query(DBGeneration).filter_by(id=gen_id).first()
+        assert gen.audio_path == new_audio_path
+    finally:
+        db.close()
+
+
 def test_apply_effects_picks_clean_version_when_present(app_ctx):
     """If a version with effects_chain=None exists, it is selected as source."""
     gen_id, _ = _make_generation(app_ctx, status="completed")
