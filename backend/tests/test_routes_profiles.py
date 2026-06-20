@@ -203,19 +203,13 @@ def test_create_profile_rejects_invalid_designed_profile_with_400(client):
     assert "design_prompt" in r.json()["detail"]
 
 
-def test_create_profile_returns_400_when_service_raises_generic_exception(
-    client, monkeypatch
-):
-    """Non-ValueError exceptions also surface as 400 (catch-all branch)."""
-    from backend.routes import profiles as profiles_route
-
-    async def boom(data, db):
-        raise RuntimeError("unexpected failure")
-
-    monkeypatch.setattr(profiles_route.profiles, "create_profile", boom)
-    r = client.post("/profiles", json={"name": "Boom"})
-    assert r.status_code == 400
-    assert r.json()["detail"] == "unexpected failure"
+# NOTE: The generic ``except Exception`` branch at routes/profiles.py:35-36 is
+# a defensive catch-all that the service layer never reaches in practice — the
+# only declared failure mode of ``profiles.create_profile`` is ``ValueError``.
+# Triggering it would require mocking the first-party service, which the
+# post-factum protocol forbids. We accept the missed line in coverage rather
+# than write a test that asserts only how the route catches a synthesized
+# exception type.
 
 
 # ---------------------------------------------------------------------------
@@ -395,25 +389,13 @@ def test_add_sample_returns_400_when_profile_missing(client):
     assert "not found" in r.json()["detail"]
 
 
-def test_add_sample_returns_500_when_service_raises_generic_exception(
-    client, monkeypatch
-):
-    """Non-ValueError exceptions surface as 500 with a Failed-to-process message."""
-    pid = client.post("/profiles", json={"name": "Boom"}).json()["id"]
-
-    from backend.routes import profiles as profiles_route
-
-    async def boom(profile_id, audio_path, reference_text, db):
-        raise RuntimeError("decoder exploded")
-
-    monkeypatch.setattr(profiles_route.profiles, "add_profile_sample", boom)
-    r = client.post(
-        f"/profiles/{pid}/samples",
-        files={"file": ("ref.wav", _make_wav_bytes(), "audio/wav")},
-        data={"reference_text": "Hello"},
-    )
-    assert r.status_code == 500
-    assert "Failed to process" in r.json()["detail"]
+# NOTE: The generic ``except Exception`` branch at routes/profiles.py:188-189
+# is a defensive catch-all the service layer never reaches in practice —
+# ``add_profile_sample`` raises ``ValueError`` for known failure modes (missing
+# profile, invalid audio) and any deeper IO failure is wrapped in an
+# ``OSError`` at the ``save_audio`` boundary. Triggering it would require a
+# first-party service mock, which the post-factum protocol forbids; we accept
+# the missed line in coverage rather than synthesize a fake exception.
 
 
 def test_add_sample_rejects_oversize_upload_with_413(client, monkeypatch):
@@ -684,8 +666,8 @@ def test_export_profile_returns_404_when_missing(client):
     assert r.status_code == 404
 
 
-def test_export_profile_returns_500_when_no_samples(client):
-    """Profile without samples raises ValueError -> 400."""
+def test_export_profile_returns_400_when_no_samples(client):
+    """Profile without samples raises ValueError → 400 with a 'no samples' detail."""
     pid = client.post("/profiles", json={"name": "Empty"}).json()["id"]
     r = client.get(f"/profiles/{pid}/export")
     # export_profile_to_zip raises ValueError("has no samples") → 400
@@ -748,67 +730,30 @@ def test_import_profile_returns_400_on_invalid_zip(client):
     # Bad-zip path lands in the generic Exception branch as 500; either is fine.
 
 
-def test_import_profile_rejects_oversize_upload(client, monkeypatch):
-    """Importing a file larger than the limit returns 400 with a size message."""
-    # The route uses a 100MB limit and a single ``await file.read()`` — patch
-    # the constant by monkeypatching the route function's locals through
-    # the module-level limit. Easier: use a smaller stub file but force the
-    # length check via patched constant at module level.
-    from backend.routes import profiles as profiles_route
+def test_import_profile_rejects_oversize_upload_with_400(client):
+    """A genuinely oversize upload (>100MB) is rejected by the size guard with 400.
 
-    # The MAX_FILE_SIZE is local to import_profile; rebind to a small
-    # value via monkeypatching the function source through code injection
-    # is ugly. Instead, monkeypatch ``export_import.import_profile_from_zip``
-    # to raise ValueError so we still exercise the 400 path. That covers
-    # the same try/except block from a different angle, and the oversize
-    # branch is already covered by add_profile_sample's analogous test.
-    async def boom(content, db):
-        raise ValueError("simulated bad import")
-
-    monkeypatch.setattr(
-        profiles_route.export_import, "import_profile_from_zip", boom
-    )
+    The route's ``MAX_FILE_SIZE`` is 100 MiB and is enforced after a single
+    ``await file.read()``. We send 100 MiB + 1 byte of arbitrary payload to
+    exercise the real size branch (routes/profiles.py:55-58); the payload
+    contents do not matter because the size check runs before the ZIP parser.
+    """
+    oversize_payload = b"\x00" * (100 * 1024 * 1024 + 1)
     r = client.post(
         "/profiles/import",
-        files={"file": ("export.zip", b"PK\x03\x04rest", "application/zip")},
+        files={"file": ("huge.zip", oversize_payload, "application/zip")},
     )
     assert r.status_code == 400
-    assert r.json()["detail"] == "simulated bad import"
+    assert "too large" in r.json()["detail"].lower()
+    assert "100" in r.json()["detail"]
 
 
-def test_import_profile_returns_500_on_unexpected_error(client, monkeypatch):
-    """Unexpected exceptions from import surface as 500."""
-    from backend.routes import profiles as profiles_route
-
-    async def boom(content, db):
-        raise RuntimeError("kaboom")
-
-    monkeypatch.setattr(
-        profiles_route.export_import, "import_profile_from_zip", boom
-    )
-    r = client.post(
-        "/profiles/import",
-        files={"file": ("export.zip", b"PK\x03\x04rest", "application/zip")},
-    )
-    assert r.status_code == 500
-    assert r.json()["detail"] == "kaboom"
-
-
-def test_export_profile_returns_500_on_unexpected_error(client, monkeypatch):
-    """Unexpected exceptions from export surface as 500."""
-    pid = client.post("/profiles", json={"name": "Err"}).json()["id"]
-
-    from backend.routes import profiles as profiles_route
-
-    def boom(profile_id, db):
-        raise RuntimeError("zip exploded")
-
-    monkeypatch.setattr(
-        profiles_route.export_import, "export_profile_to_zip", boom
-    )
-    r = client.get(f"/profiles/{pid}/export")
-    assert r.status_code == 500
-    assert r.json()["detail"] == "zip exploded"
+# NOTE: The generic ``except Exception`` branch at routes/profiles.py:65-66
+# (import) and 306-307 (export) is a defensive catch-all. The export branch is
+# additionally documented as a bug in test_export_profile_returns_404_when_missing
+# above — it swallows the explicit HTTPException(404). Triggering either branch
+# with a real input would require a first-party service mock, which the
+# post-factum protocol forbids; we accept the missed lines in coverage.
 
 
 # ---------------------------------------------------------------------------
@@ -849,16 +794,12 @@ def test_set_profile_channels_rejects_unknown_profile_with_400(client):
     assert "not found" in r.json()["detail"]
 
 
-def test_get_profile_channels_returns_400_when_service_raises(client, monkeypatch):
-    from backend.routes import profiles as profiles_route
-
-    async def boom(profile_id, db):
-        raise ValueError("channels broken")
-
-    monkeypatch.setattr(profiles_route.channels, "get_profile_channels", boom)
-    r = client.get(f"/profiles/{uuid.uuid4()}/channels")
-    assert r.status_code == 400
-    assert r.json()["detail"] == "channels broken"
+# NOTE: The ValueError handler at routes/profiles.py:319-320 in
+# get_profile_channels is a passthrough; the underlying service only raises
+# ValueError indirectly through other code paths and exercising it on a real
+# input would require constructing an inconsistent DB state. We rely on
+# set_profile_channels (which uses the same wrapper pattern) to cover the
+# ValueError-as-400 branch via test_set_profile_channels_rejects_unknown_profile_with_400.
 
 
 # ---------------------------------------------------------------------------
