@@ -21,7 +21,10 @@ target/
 *.exe
 *.msi
 *.deb
+*.epub
+*.fb2
 *.AppImage
+*.mp3
 
 # IDE
 .vscode/
@@ -52,7 +55,7 @@ tauri/src-tauri/binaries/*
 # Audit stubs: keep zero-byte sidecar placeholders out of the tree
 tauri/src-tauri/binaries/voiceit-*-linux-gnu
 tauri/src-tauri/gen/Assets.car
-tauri/src-tauri/gen/voicebox.icns
+tauri/src-tauri/gen/voiceit.icns
 tauri/src-tauri/gen/partial.plist
 
 # PyInstaller
@@ -70,3 +73,13 @@ temp/
 backend/tests/results/
 backend/tests/fixtures/reference_voice.wav
 backend/tests/fixtures/reference_voice.txt
+
+# Coverage / test artifacts (audit-coverage tooling drops these in the
+# tree; CI re-generates them on every run so they don't belong in git).
+.coverage
+app/coverage/
+app/test-results/
+tauri/src-tauri/tarpaulin-report.json
+
+# Tauri-generated permissions schemas (regenerated on every build).
+tauri/src-tauri/gen/schemas/linux-schema.json
