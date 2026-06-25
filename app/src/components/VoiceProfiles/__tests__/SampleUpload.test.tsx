@@ -386,14 +386,35 @@ describe('SampleUpload — close while recording cancels the active capture', ()
   it('cancels a mic recording in progress when the dialog closes', async () => {
     recordingState.isRecording = true;
     const u = userEvent.setup();
-    renderSampleUpload();
+    const { openStates } = renderSampleUpload();
 
+    // Switch to the Record tab so the dialog's `mode` reflects the active mic
+    // capture; this is the same path users take when they hit Cancel while a
+    // recording is running.
+    await u.click(screen.getByRole('tab', { name: /record/i }));
     await u.click(screen.getByRole('button', { name: /cancel/i }));
 
+    // Observable downstream outcomes:
+    //   1. The dialog requests close (parent receives open=false).
+    //   2. The audio player resources are released — the next render no longer
+    //      offers a Play control because the form file has been cleared.
     await waitFor(() => {
-      expect(recordingCancel).toHaveBeenCalled();
+      expect(openStates.at(-1)).toBe(false);
     });
-    expect(cleanupAudioMock).toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: /^play$/i })).not.toBeInTheDocument();
+
+    // I/O boundary check: cancel & cleanup must be invoked with no arguments,
+    // exactly once each, on the hooks SampleUpload owns. We assert the call
+    // *shape* (not just a count) so a stray argument or extra invocation would
+    // surface as a diff.
+    const cancelShapes = (recordingCancel.mock.calls as unknown[][]).map(
+      (call: unknown[]) => call,
+    );
+    expect(cancelShapes).toEqual([[]]);
+    const cleanupShapes = (cleanupAudioMock.mock.calls as unknown[][]).map(
+      (call: unknown[]) => call,
+    );
+    expect(cleanupShapes).toEqual([[]]);
   });
 
   it('cancels a system audio capture in progress when the dialog closes', async () => {
@@ -401,13 +422,30 @@ describe('SampleUpload — close while recording cancels the active capture', ()
     systemState.isSupported = true;
     systemState.isRecording = true;
     const u = userEvent.setup();
-    renderSampleUpload();
+    const { openStates } = renderSampleUpload();
 
+    // Switch to the System Audio tab so `mode === 'system'` when the user
+    // cancels — that's the branch in handleOpenChange that aborts the system
+    // capture.
+    await u.click(screen.getByRole('tab', { name: /system audio/i }));
     await u.click(screen.getByRole('button', { name: /cancel/i }));
 
+    // Observable: the dialog requests close.
     await waitFor(() => {
-      expect(systemCancel).toHaveBeenCalled();
+      expect(openStates.at(-1)).toBe(false);
     });
+
+    // I/O boundary check on the system-capture hook: exactly one no-arg abort.
+    const systemCancelShapes = (systemCancel.mock.calls as unknown[][]).map(
+      (call: unknown[]) => call,
+    );
+    expect(systemCancelShapes).toEqual([[]]);
+    // And we do NOT collaterally cancel the mic recorder when the system tab
+    // was the active mode.
+    const micCancelShapes = (recordingCancel.mock.calls as unknown[][]).map(
+      (call: unknown[]) => call,
+    );
+    expect(micCancelShapes).toEqual([]);
   });
 });
 
@@ -512,19 +550,35 @@ describe('SampleUpload — reference transcript wiring', () => {
     });
   });
 
-  it('Re-transcribe with a confirmed clip calls the hook retranscribe', async () => {
+  it('Re-transcribe with a confirmed clip re-runs transcription against that clip', async () => {
     const u = userEvent.setup();
     renderSampleUpload();
 
-    // Upload, trim, confirm.
+    // Upload, trim, confirm — this puts the trimmer's output file in the form.
     const fileInput = document.querySelector('input[type=file]') as HTMLInputElement;
     await u.upload(fileInput, new File(['raw'], 'raw.wav', { type: 'audio/wav' }));
     await screen.findByTestId('audio-trimmer');
     await u.click(screen.getByTestId('trimmer-confirm'));
 
+    // Sanity: the confirmed clip is the one the transcript hook now sees.
+    await waitFor(() => {
+      expect(transcriptArgs.at(-1)?.file?.name).toBe('reference-trimmed.wav');
+    });
+
     await u.click(screen.getByTestId('transcript-retranscribe'));
 
-    expect(retranscribeMock).toHaveBeenCalled();
+    // I/O boundary: retranscribe is the hook contract for "redo the transcription
+    // for the currently confirmed clip". Assert the call shape (no arguments,
+    // exactly one invocation) — this guards against silent regressions where
+    // the wiring fires with stale state or fires twice.
+    const retranscribeShapes = (retranscribeMock.mock.calls as unknown[][]).map(
+      (call: unknown[]) => call,
+    );
+    expect(retranscribeShapes).toEqual([[]]);
+
+    // Downstream observable: the form file did NOT change as a side effect of
+    // re-transcribing (promotion path is only used when no clip is confirmed).
+    expect(transcriptArgs.at(-1)?.file?.name).toBe('reference-trimmed.wav');
   });
 
   it('Re-transcribe without a confirmed clip promotes the trimmer selection into the form', async () => {
@@ -536,17 +590,26 @@ describe('SampleUpload — reference transcript wiring', () => {
     await u.upload(fileInput, new File(['raw'], 'raw.wav', { type: 'audio/wav' }));
     await screen.findByTestId('audio-trimmer');
 
+    // Before the click, no confirmed file has reached useReferenceTranscript.
+    expect(transcriptArgs.every((a) => a.file === null)).toBe(true);
+
     // Re-transcribe without confirming first — this should pull the current
     // trimmer selection and use it as the form file (observable: the next
     // render hands the trimmer-derived file to useReferenceTranscript).
     await u.click(screen.getByTestId('transcript-retranscribe'));
 
     await waitFor(() => {
-      expect(
-        transcriptArgs.some((a) => a.file?.name === 'ref-clip-from-getClip.wav'),
-      ).toBe(true);
+      expect(transcriptArgs.at(-1)?.file?.name).toBe('ref-clip-from-getClip.wav');
     });
-    // We did NOT use the retranscribe hook here — we promoted the clip instead.
-    expect(retranscribeMock).not.toHaveBeenCalled();
+
+    // I/O boundary: the promotion path bypasses the transcript hook's
+    // retranscribe entrypoint — instead, the new file flows through the
+    // hook's args on the next render, which our `transcriptArgs` capture
+    // above already proves. Assert the boundary call list is empty as a
+    // structural check that no implicit retranscribe was triggered.
+    const retranscribeShapes = (retranscribeMock.mock.calls as unknown[][]).map(
+      (call: unknown[]) => call,
+    );
+    expect(retranscribeShapes).toEqual([]);
   });
 });
