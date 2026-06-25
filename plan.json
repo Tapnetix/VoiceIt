@@ -1,0 +1,205 @@
+{
+  "meta": {
+    "generated": "2026-06-25",
+    "audit_target": {
+      "js": 80,
+      "python": 80,
+      "rust_pure_logic_plus_tested_io": 80
+    },
+    "stacks": ["js", "python", "rust"],
+    "vitest_coverage_widen": {
+      "include": ["src/**/*.{ts,tsx}"],
+      "exclude": [
+        "src/**/*.test.{ts,tsx}",
+        "src/**/__tests__/**",
+        "src/**/__mocks__/**",
+        "src/main.tsx",
+        "src/components/DictateWindow/**",
+        "src/components/AccessibilityGate/**",
+        "src/components/InputMonitoringGate/**",
+        "src/components/CapturesTab/**",
+        "src/lib/hooks/useChordSync.ts",
+        "src/lib/hooks/useCaptureRecordingSession.ts"
+      ]
+    },
+    "rust_exclude_files": [
+      "src/audio_capture/linux.rs",
+      "src/audio_capture/macos.rs",
+      "src/audio_capture/windows.rs",
+      "src/audio_output.rs",
+      "src/hotkey_monitor.rs",
+      "src/speak_monitor.rs",
+      "src/clipboard.rs"
+    ],
+    "deferred_followups_next_audit": [
+      "src/speak_monitor.rs (68 lines) — fake-backed unit tests",
+      "src/clipboard.rs (12 lines) — arboard-trait wrap + unit tests"
+    ]
+  },
+
+  "tasks": [
+    {
+      "id": "T-TS-01",
+      "task_type": "tooling-setup",
+      "title": "Widen vitest coverage scope",
+      "description": "Replace the current 7-pattern coverage.include allow-list in app/vitest.config.ts with the wide include + explicit exclude shape defined in design.md §2 / plan.json meta.vitest_coverage_widen. Adds json-summary to the reporter list so audit-rank-files keeps working.",
+      "files": { "modify": ["app/vitest.config.ts"], "create": [], "delete": [], "test": [] }
+    },
+    {
+      "id": "T-TS-02",
+      "task_type": "tooling-setup",
+      "title": "Add OpenAPI drift gate to Jenkinsfile Verify (S16)",
+      "description": "Append a step to the Verify: frontend stage that boots the backend in the background, runs scripts/generate-api.sh against it, and fails with `git diff --exit-code app/src/lib/api/ app/openapi.json` if the committed client drifts. The drift gate must run AFTER `bun install` (so openapi-typescript-codegen is available) and BEFORE typecheck/vitest. Idempotent across builds.",
+      "files": { "modify": ["Jenkinsfile"], "create": [], "delete": [], "test": [] }
+    },
+    {
+      "id": "T-TS-03",
+      "task_type": "tooling-setup",
+      "title": "Provision tauri-driver + Playwright Tauri fixtures",
+      "description": "Install tauri-driver on the pockeo-linux agent (cargo install tauri-driver --locked, plus apt-get-equivalent setup of webkit2gtk-driver via $HOME/.local/bin static install — no sudo). Write app/e2e/fixtures-tauri.ts that boots the packaged Tauri binary under tauri-driver and yields a configured Playwright page. Add a new playwright.config.ts profile `tauri` so r17a/r17b/r18-21 specs can be selected separately from the dev-web specs. Document that this CI path runs on Linux only (macOS unsupported by tauri-driver as of 2026-Q2).",
+      "files": {
+        "modify": ["Jenkinsfile", "app/playwright.config.ts", "justfile"],
+        "create": ["app/e2e/fixtures-tauri.ts"],
+        "delete": [],
+        "test": []
+      }
+    },
+    {
+      "id": "T-TS-04",
+      "task_type": "tooling-setup",
+      "title": "Un-ignore backend/tests/test_profile_duplicate_names.py",
+      "description": "Delete the `--ignore=backend/tests/test_profile_duplicate_names.py` line from the Jenkinsfile Verify: backend pytest invocation. Manually verified all 6 tests pass when run in isolation (2026-06-25). If a flake appears under full-suite parallel execution, file a follow-up task — do not re-add the ignore.",
+      "files": { "modify": ["Jenkinsfile"], "create": [], "delete": [], "test": ["backend/tests/test_profile_duplicate_names.py"] }
+    },
+
+    { "id": "T-LQ-01", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/SegmentRegenerateControl.tsx", "files": { "create": [], "modify": ["app/src/__tests__/acceptance/s5.test.ts"], "delete": [], "test": ["app/src/__tests__/acceptance/s5.test.ts"] }, "notes": "ACCEPTANCE SPEC — re-anchor on S5's user-observable outcome (dialogue reassignment lands and persists), not just swap matchers. 7× call-count assertions to remove." },
+    { "id": "T-LQ-02", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/", "files": { "create": [], "modify": ["app/src/__tests__/acceptance/s6.test.ts"], "delete": [], "test": ["app/src/__tests__/acceptance/s6.test.ts"] }, "notes": "ACCEPTANCE SPEC — re-anchor on S6's observable (chapter/book audio generated, segments rendered). 2× vacuous-assertions at L119, L142." },
+    { "id": "T-LQ-03", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/AudiobookExport.tsx", "files": { "create": [], "modify": ["app/src/components/BooksTab/__tests__/AudiobookExport.test.tsx"], "delete": [], "test": ["app/src/components/BooksTab/__tests__/AudiobookExport.test.tsx"] }, "notes": "Replace toHaveBeenCalled* with behavior-shape assertions." },
+    { "id": "T-LQ-04", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/BookImport.tsx", "files": { "create": [], "modify": ["app/src/components/BooksTab/__tests__/BookImport.test.tsx"], "delete": [], "test": ["app/src/components/BooksTab/__tests__/BookImport.test.tsx"] }, "notes": "7× call-count." },
+    { "id": "T-LQ-05", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/BookOverview.tsx", "files": { "create": [], "modify": ["app/src/components/BooksTab/__tests__/BookOverview.test.tsx"], "delete": [], "test": ["app/src/components/BooksTab/__tests__/BookOverview.test.tsx"] } },
+    { "id": "T-LQ-06", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/ChapterEditor.tsx", "files": { "create": [], "modify": ["app/src/components/BooksTab/__tests__/ChapterEditor.test.tsx"], "delete": [], "test": ["app/src/components/BooksTab/__tests__/ChapterEditor.test.tsx"] } },
+    { "id": "T-LQ-07", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/ChapterEditor.tsx", "files": { "create": [], "modify": ["app/src/components/BooksTab/__tests__/ChapterEditorEmotion.test.tsx"], "delete": [], "test": ["app/src/components/BooksTab/__tests__/ChapterEditorEmotion.test.tsx"] } },
+    { "id": "T-LQ-08", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/ChapterReadAlong.tsx", "files": { "create": [], "modify": ["app/src/components/BooksTab/__tests__/ChapterReadAlong.test.tsx"], "delete": [], "test": ["app/src/components/BooksTab/__tests__/ChapterReadAlong.test.tsx"] }, "notes": "1× vacuous (L274), 1× implementation-naming (L240). Rename the implementation-named test." },
+    { "id": "T-LQ-09", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/SegmentRegenerateControl.tsx", "files": { "create": [], "modify": ["app/src/components/BooksTab/__tests__/SegmentRegenerateControl.test.tsx"], "delete": [], "test": ["app/src/components/BooksTab/__tests__/SegmentRegenerateControl.test.tsx"] }, "notes": "1× vacuous (L216)." },
+    { "id": "T-LQ-10", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/VoiceEditor.tsx", "files": { "create": [], "modify": ["app/src/components/BooksTab/__tests__/VoiceEditor.test.tsx"], "delete": [], "test": ["app/src/components/BooksTab/__tests__/VoiceEditor.test.tsx"] } },
+    { "id": "T-LQ-11", "task_type": "existing-test-improve", "source_file": "app/src/components/BooksTab/VoiceEditor.tsx", "files": { "create": [], "modify": ["app/src/components/BooksTab/__tests__/VoiceEditorClone.test.tsx"], "delete": [], "test": ["app/src/components/BooksTab/__tests__/VoiceEditorClone.test.tsx"] }, "notes": "1× implementation-naming (L121). Rename the test." },
+    { "id": "T-LQ-12", "task_type": "existing-test-improve", "source_file": "app/src/components/VoiceProfiles/AudioSampleRecording.tsx", "files": { "create": [], "modify": ["app/src/components/VoiceProfiles/__tests__/AudioSampleRecording.test.tsx"], "delete": [], "test": ["app/src/components/VoiceProfiles/__tests__/AudioSampleRecording.test.tsx"] }, "notes": "7× call-count." },
+    { "id": "T-LQ-13", "task_type": "existing-test-improve", "source_file": "app/src/components/VoiceProfiles/AudioSampleUpload.tsx", "files": { "create": [], "modify": ["app/src/components/VoiceProfiles/__tests__/AudioSampleUpload.test.tsx"], "delete": [], "test": ["app/src/components/VoiceProfiles/__tests__/AudioSampleUpload.test.tsx"] }, "notes": "11× call-count." },
+    { "id": "T-LQ-14", "task_type": "existing-test-improve", "source_file": "app/src/components/VoiceProfiles/ProfileCard.tsx", "files": { "create": [], "modify": ["app/src/components/VoiceProfiles/__tests__/ProfileCard.test.tsx"], "delete": [], "test": ["app/src/components/VoiceProfiles/__tests__/ProfileCard.test.tsx"] } },
+    { "id": "T-LQ-15", "task_type": "existing-test-improve", "source_file": "app/src/components/VoiceProfiles/ProfileList.tsx", "files": { "create": [], "modify": ["app/src/components/VoiceProfiles/__tests__/ProfileList.test.tsx"], "delete": [], "test": ["app/src/components/VoiceProfiles/__tests__/ProfileList.test.tsx"] } },
+    { "id": "T-LQ-16", "task_type": "existing-test-improve", "source_file": "app/src/components/VoiceProfiles/SampleList.tsx", "files": { "create": [], "modify": ["app/src/components/VoiceProfiles/__tests__/SampleList.test.tsx"], "delete": [], "test": ["app/src/components/VoiceProfiles/__tests__/SampleList.test.tsx"] }, "notes": "14× call-count (highest concentration)." },
+    { "id": "T-LQ-17", "task_type": "existing-test-improve", "source_file": "app/src/components/VoiceProfiles/SampleUpload.tsx", "files": { "create": [], "modify": ["app/src/components/VoiceProfiles/__tests__/SampleUpload.test.tsx"], "delete": [], "test": ["app/src/components/VoiceProfiles/__tests__/SampleUpload.test.tsx"] } },
+    { "id": "T-LQ-18", "task_type": "existing-test-improve", "source_file": "app/src/lib/hooks/useBookProgress.ts", "files": { "create": [], "modify": ["app/src/lib/hooks/__tests__/useBookProgress.test.ts"], "delete": [], "test": ["app/src/lib/hooks/__tests__/useBookProgress.test.ts"] }, "notes": "3× vacuous (L223, L224, L266)." },
+    { "id": "T-LQ-19", "task_type": "existing-test-improve", "source_file": "app/src/lib/hooks/useReferenceTranscript.ts", "files": { "create": [], "modify": ["app/src/lib/hooks/__tests__/useReferenceTranscript.test.ts"], "delete": [], "test": ["app/src/lib/hooks/__tests__/useReferenceTranscript.test.ts"] } },
+
+    {
+      "id": "T-UT-DICTATE",
+      "task_type": "unit-test",
+      "source_file": "app/src/components/DictateWindow/DictateWindow.tsx",
+      "files": {
+        "create": ["app/src/components/DictateWindow/__tests__/DictateWindow.test.tsx"],
+        "modify": [],
+        "delete": [],
+        "test": ["app/src/components/DictateWindow/__tests__/DictateWindow.test.tsx"]
+      },
+      "notes": "Unit test the component with `@tauri-apps/api/core` (invoke) and `@tauri-apps/api/event` (emit/listen) mocked. Cover: dictation start, stop, and the event listener cleanup on unmount."
+    },
+    {
+      "id": "T-UT-A11Y",
+      "task_type": "unit-test",
+      "source_file": "app/src/components/AccessibilityGate/AccessibilityGate.tsx",
+      "files": {
+        "create": ["app/src/components/AccessibilityGate/__tests__/AccessibilityGate.test.tsx"],
+        "modify": [],
+        "delete": [],
+        "test": ["app/src/components/AccessibilityGate/__tests__/AccessibilityGate.test.tsx"]
+      },
+      "notes": "Mock @tauri-apps/api/core invoke + @tauri-apps/api/event listen. Cover: ungranted state shows gate, granted state hides gate, listener cleanup. NOTE: this verifies component reaction to mocked events — the underlying macOS permission API has no automated verification this run."
+    },
+    {
+      "id": "T-UT-IM",
+      "task_type": "unit-test",
+      "source_file": "app/src/components/InputMonitoringGate/InputMonitoringGate.tsx",
+      "files": {
+        "create": ["app/src/components/InputMonitoringGate/__tests__/InputMonitoringGate.test.tsx"],
+        "modify": [],
+        "delete": [],
+        "test": ["app/src/components/InputMonitoringGate/__tests__/InputMonitoringGate.test.tsx"]
+      },
+      "notes": "Mock @tauri-apps/api/core invoke. Cover: ungranted state shows gate, granted state hides gate. Same macOS-API gap caveat as T-UT-A11Y."
+    },
+    {
+      "id": "T-UT-CAPTURES",
+      "task_type": "unit-test",
+      "source_file": "app/src/components/CapturesTab/CapturesTab.tsx",
+      "files": {
+        "create": ["app/src/components/CapturesTab/__tests__/CapturesTab.test.tsx"],
+        "modify": [],
+        "delete": [],
+        "test": ["app/src/components/CapturesTab/__tests__/CapturesTab.test.tsx"]
+      },
+      "notes": "Mock @tauri-apps/api/event listen + @tauri-apps/plugin-dialog save + @tauri-apps/plugin-fs writeFile/writeTextFile. Cover: incoming capture event renders to list, save-to-disk action calls plugin-dialog then plugin-fs, listener cleanup."
+    },
+
+    {
+      "id": "T-IT-S22",
+      "task_type": "integration-test",
+      "scenario": "S22",
+      "source_file": "backend/routes/profiles.py",
+      "files": {
+        "create": [],
+        "modify": ["backend/routes/profiles.py", "backend/tests/test_routes_profiles.py"],
+        "delete": [],
+        "test": ["backend/tests/test_routes_profiles.py::test_get_profile_by_id_returns_404_when_missing"]
+      },
+      "notes": "Fix the U-py-012 bug: in backend/routes/profiles.py:307, re-raise HTTPException BEFORE the catch-all `except Exception`. Pattern:\n  try:\n      ...\n  except HTTPException:\n      raise\n  except Exception as e:\n      ...\nFlip the xfail at backend/tests/test_routes_profiles.py:653 to a normal test (remove @pytest.mark.xfail, rename if needed for clarity). The test should assert resp.status_code == 404, NOT 500."
+    },
+
+    {
+      "id": "T-E2E-S16",
+      "task_type": "e2e-spec",
+      "scenario": "S16",
+      "files": {
+        "create": [],
+        "modify": [],
+        "delete": [],
+        "test": []
+      },
+      "notes": "No separate spec file — S16 is the CI-gate outcome of T-TS-02. Verify Phase covers it by triggering a Jenkins build with an intentional drift, confirming the build fails. No source file changes; this entry is here for scenario-completeness tracking."
+    },
+    { "id": "T-E2E-S17A", "task_type": "e2e-spec", "scenario": "S17a", "files": { "create": ["app/e2e/r17a.spec.ts"], "modify": [], "delete": [], "test": ["app/e2e/r17a.spec.ts"] }, "notes": "Boot-smoke: tauri-driver launches the packaged binary, page reaches BooksTab. Use fixtures-tauri.ts from T-TS-03." },
+    { "id": "T-E2E-S17B", "task_type": "e2e-spec", "scenario": "S17b", "files": { "create": ["app/e2e/r17b.spec.ts"], "modify": [], "delete": [], "test": ["app/e2e/r17b.spec.ts"] }, "notes": "IPC round-trip: with the packaged app open, page.evaluate calls `@tauri-apps/api/core` invoke('ping' or another no-op handler) and asserts the response. May require adding a `#[tauri::command] fn ping() -> &'static str { \"pong\" }` to tauri/src-tauri/src/lib.rs as the test fixture." },
+    { "id": "T-E2E-S18", "task_type": "e2e-spec", "scenario": "S18", "files": { "create": ["app/e2e/r18.spec.ts"], "modify": [], "delete": [], "test": ["app/e2e/r18.spec.ts"] }, "notes": "DictateWindow flow against real Tauri binary." },
+    { "id": "T-E2E-S19", "task_type": "e2e-spec", "scenario": "S19", "files": { "create": ["app/e2e/r19.spec.ts"], "modify": [], "delete": [], "test": ["app/e2e/r19.spec.ts"] }, "notes": "AccessibilityGate component reaction (mocked permission events). Linux-only via tauri-driver; the real macOS Accessibility API has no automated verification this run — recorded in design.md §4." },
+    { "id": "T-E2E-S20", "task_type": "e2e-spec", "scenario": "S20", "files": { "create": ["app/e2e/r20.spec.ts"], "modify": [], "delete": [], "test": ["app/e2e/r20.spec.ts"] }, "notes": "InputMonitoringGate component reaction (mocked permission events). Same macOS caveat as S19." },
+    { "id": "T-E2E-S21", "task_type": "e2e-spec", "scenario": "S21", "files": { "create": ["app/e2e/r21.spec.ts"], "modify": [], "delete": [], "test": ["app/e2e/r21.spec.ts"] }, "notes": "CapturesTab: listen for capture events → render to list → save selected capture to disk." }
+  ],
+
+  "batches": [
+    {
+      "id": "B1",
+      "tasks": ["T-TS-01", "T-TS-02", "T-TS-03", "T-TS-04"],
+      "rationale": "Tooling-setup first. Without T-TS-01 the coverage-gap follow-up batch (see B5) can't enumerate JS gaps. Without T-TS-03 the e2e batch can't run. T-TS-02 (drift gate) and T-TS-04 (un-ignore) are independent and parallel with T-TS-01."
+    },
+    {
+      "id": "B2",
+      "tasks": ["T-LQ-01", "T-LQ-02", "T-LQ-03", "T-LQ-04", "T-LQ-05", "T-LQ-06", "T-LQ-07", "T-LQ-08", "T-LQ-09", "T-LQ-10", "T-LQ-11", "T-LQ-12", "T-LQ-13", "T-LQ-14", "T-LQ-15", "T-LQ-16", "T-LQ-17", "T-LQ-18", "T-LQ-19"],
+      "rationale": "19 existing-test-improve tasks. File sets are disjoint (each task touches one test file). Run in parallel."
+    },
+    {
+      "id": "B3",
+      "tasks": ["T-UT-DICTATE", "T-UT-A11Y", "T-UT-IM", "T-UT-CAPTURES", "T-IT-S22"],
+      "rationale": "4 unit-test tasks (new files in disjoint dirs) + 1 integration-test task. Run in parallel."
+    },
+    {
+      "id": "B4",
+      "tasks": ["T-E2E-S16", "T-E2E-S17A", "T-E2E-S17B", "T-E2E-S18", "T-E2E-S19", "T-E2E-S20", "T-E2E-S21"],
+      "rationale": "7 e2e-spec tasks. All depend on T-TS-03 (tauri-driver provisioning) — must run after B1. T-E2E-S16 has no spec file but its verification is part of this batch's scenario-coverage sweep."
+    },
+    {
+      "id": "B5_conditional",
+      "tasks": [],
+      "rationale": "Coverage-gap follow-up batch. After B1's T-TS-01 widens the vitest scope, re-run JS coverage. Any file below 80% gets a dynamically-emitted unit-test task added here. This batch may be empty if widening doesn't drop any file below 80% — likely outcome since the existing audited subset is at 91.92% and the unmeasured files are mostly excluded (Tauri-IPC) or already tested via the existing suite."
+    }
+  ]
+}
