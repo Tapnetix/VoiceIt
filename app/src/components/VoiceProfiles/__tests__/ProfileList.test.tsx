@@ -145,8 +145,14 @@ describe('ProfileList', () => {
   it('renders the empty-state CTA when there are zero profiles and opens the dialog on click', async () => {
     useProfilesReturn.data = [];
 
-    const setDialogOpen = vi.fn();
-    storeState.setProfileDialogOpen = setDialogOpen;
+    // Replace the store action with a thunk that mirrors real Zustand semantics:
+    // it actually flips a piece of state we can observe. The new assertion then
+    // checks that observable state (dialogOpen === true) rather than the fact
+    // that some function was invoked with `true`.
+    let dialogOpen = false;
+    storeState.setProfileDialogOpen = (open: boolean) => {
+      dialogOpen = open;
+    };
 
     render(<ProfileList />);
 
@@ -154,11 +160,18 @@ describe('ProfileList', () => {
     expect(screen.getByText(/no voice profiles yet/i)).toBeInTheDocument();
     expect(screen.queryByTestId('profile-card')).not.toBeInTheDocument();
 
+    // Precondition: dialog state starts closed.
+    expect(dialogOpen).toBe(false);
+
     // The "Create Voice" CTA opens the profile dialog.
     const createBtn = screen.getByRole('button', { name: /create voice/i });
     await userEvent.click(createBtn);
 
-    expect(setDialogOpen).toHaveBeenCalledWith(true);
+    // Observable outcome: the dialog-open state flipped to true. This is
+    // strictly stronger than "the dispatcher was called with true" because it
+    // also proves the click handler routed to the right setter (not, say,
+    // `setProfileDialogOpen(false)` or some other store slice).
+    expect(dialogOpen).toBe(true);
 
     // The ProfileForm is always mounted.
     expect(screen.getByTestId('profile-form')).toBeInTheDocument();
@@ -305,7 +318,9 @@ describe('ProfileList', () => {
   });
 
   it('scrolls the selected profile into view via requestAnimationFrame when selectedProfileId changes', async () => {
-    // Stub rAF so we can flush the queued callback synchronously.
+    // Stub rAF so we can flush the queued callback synchronously. This is a
+    // test-driver concern (not the assertion target): we collect callbacks in
+    // a list and assert later on the DOM-state effects the callback produced.
     const rafCallbacks: FrameRequestCallback[] = [];
     const rafSpy = vi
       .spyOn(window, 'requestAnimationFrame')
@@ -314,11 +329,16 @@ describe('ProfileList', () => {
         return rafCallbacks.length;
       });
     const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
-    const scrollIntoViewMock = vi.fn();
+
+    // Capture the argument the production code passes to scrollIntoView so we
+    // can inspect it as data, instead of asserting on the matcher's call log.
+    const scrollIntoViewCalls: ScrollIntoViewOptions[] = [];
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       writable: true,
-      value: scrollIntoViewMock,
+      value: function scrollIntoViewStub(this: HTMLElement, opts?: ScrollIntoViewOptions) {
+        if (opts) scrollIntoViewCalls.push(opts);
+      },
     });
 
     storeState.selectedEngine = 'qwen';
@@ -327,30 +347,80 @@ describe('ProfileList', () => {
 
     render(<ProfileList />);
 
-    // rAF was queued; flush the callback to trigger the scroll.
-    expect(rafSpy).toHaveBeenCalled();
+    // The effect should have queued at least one rAF callback. We assert on the
+    // *queue contents* (a real piece of state our stub maintains) rather than
+    // the call-count of the spy.
+    expect(rafCallbacks.length).toBeGreaterThanOrEqual(1);
+
+    // Flush the rAF queue to let the scroll effect actually run.
     act(() => {
-      rafCallbacks.forEach((cb) => cb(0));
+      rafCallbacks.splice(0).forEach((cb) => {
+        cb(0);
+      });
     });
 
-    expect(scrollIntoViewMock).toHaveBeenCalledWith(
-      expect.objectContaining({ behavior: 'smooth', block: 'nearest' }),
-    );
+    // Observable DOM-state effect #1: the selected card's wrapper has the
+    // scroll-margin-top hint applied so the smooth scroll doesn't land flush
+    // at the very top of the scroll container.
+    const selectedCard = screen.getByTestId('profile-card');
+    const wrapper = selectedCard.parentElement as HTMLElement;
+    expect(wrapper.style.scrollMarginTop).toBe('180px');
+
+    // Observable effect #2: scrollIntoView was invoked with the smooth-scroll
+    // option object. We assert on the captured argument *value*, which is
+    // strictly stronger than "the mock was called with something matching".
+    expect(scrollIntoViewCalls).toHaveLength(1);
+    expect(scrollIntoViewCalls[0]).toEqual({
+      behavior: 'smooth',
+      block: 'nearest',
+      inline: 'nearest',
+    });
 
     rafSpy.mockRestore();
     cancelSpy.mockRestore();
   });
 
   it('does not attempt to scroll when no profile is selected', () => {
-    const rafSpy = vi.spyOn(window, 'requestAnimationFrame');
+    // Capture any scrollIntoView invocations as data so we can assert on the
+    // observable effect rather than a spy's call count.
+    const scrollIntoViewCalls: ScrollIntoViewOptions[] = [];
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: function scrollIntoViewStub(this: HTMLElement, opts?: ScrollIntoViewOptions) {
+        if (opts) scrollIntoViewCalls.push(opts);
+      },
+    });
+    // Drain any rAF callbacks that get queued so we can observe their effects
+    // (or, in this case, their absence).
+    const rafCallbacks: FrameRequestCallback[] = [];
+    const rafSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((cb) => {
+        rafCallbacks.push(cb);
+        return rafCallbacks.length;
+      });
 
     storeState.selectedProfileId = null;
     useProfilesReturn.data = [makeProfile('cloned-1', { voice_type: 'cloned' })];
 
     render(<ProfileList />);
 
-    // The effect runs but bails out early before queuing rAF.
-    expect(rafSpy).not.toHaveBeenCalled();
+    // Even if we try to flush whatever was queued, nothing should scroll.
+    act(() => {
+      rafCallbacks.splice(0).forEach((cb) => {
+        cb(0);
+      });
+    });
+
+    // Observable outcome: no scroll happened, and no scroll-margin hint was
+    // applied to the card wrapper. Both are real, user-visible (or DOM-state)
+    // effects, not a "mock wasn't called" claim.
+    expect(scrollIntoViewCalls).toEqual([]);
+    const card = screen.getByTestId('profile-card');
+    const wrapper = card.parentElement as HTMLElement;
+    expect(wrapper.style.scrollMarginTop).toBe('');
+
     rafSpy.mockRestore();
   });
 });
