@@ -14,17 +14,32 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./vitest.setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // The integration-shaped tests (booksRoute, acceptance specs) cross
+    // the 5s default under istanbul instrumentation now that coverage
+    // measures all of src/**. Without the widened scope these completed
+    // in ~1s. Bump the cap so coverage runs don't flake while still
+    // catching genuine hangs.
+    testTimeout: 15_000,
     coverage: {
       provider: 'istanbul',
-      reporter: ['text', 'html'],
-      include: [
-        'src/components/BooksTab/**',
-        'src/lib/hooks/useBooks*.ts',
-        'src/stores/booksStore.ts',
-        'src/lib/utils/audio.ts',
-        'src/components/AudioTrimmer/**',
-        'src/components/VoiceProfiles/**',
-        'src/lib/hooks/useReferenceTranscript.ts',
+      reporter: ['text', 'html', 'json-summary'],
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        'src/**/*.test.{ts,tsx}',
+        'src/**/__tests__/**',
+        'src/**/__mocks__/**',
+        'src/main.tsx',
+        // Tauri-IPC-using components: verified by tauri-driver E2E (S18-S21)
+        // and unit tests with @tauri-apps mocked; excluded from line-coverage
+        // gate so the headline number doesn't conflate "tested via real
+        // packaged app" with "tested via mocked unit layer". See
+        // design.md §2.
+        'src/components/DictateWindow/**',
+        'src/components/AccessibilityGate/**',
+        'src/components/InputMonitoringGate/**',
+        'src/components/CapturesTab/**',
+        'src/lib/hooks/useChordSync.ts',
+        'src/lib/hooks/useCaptureRecordingSession.ts',
       ],
     },
   },
