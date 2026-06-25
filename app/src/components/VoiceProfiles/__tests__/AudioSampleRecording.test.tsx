@@ -124,7 +124,19 @@ describe('AudioSampleRecording — idle state', () => {
 
     await user.click(screen.getByRole('button', { name: /start recording/i }));
 
-    expect(onStart).toHaveBeenCalledTimes(1);
+    // Behavior shape: clicking Start Recording forwards exactly one click event
+    // sourced from the Start Recording button. We capture event.type and the
+    // target button's accessible label so a regression that re-binds onStart to
+    // a different control (or fires from a non-click lifecycle) changes shape.
+    // We read `target` rather than `currentTarget` because React nulls out
+    // `currentTarget` after the synthetic event is dispatched.
+    const startInvocations = onStart.mock.calls.map(
+      ([e]: [React.MouseEvent<HTMLButtonElement>]) => ({
+        type: e.type,
+        label: (e.target as HTMLElement).closest('button')?.textContent?.trim().toLowerCase(),
+      }),
+    );
+    expect(startInvocations).toEqual([{ type: 'click', label: 'start recording' }]);
   });
 });
 
@@ -173,7 +185,19 @@ describe('AudioSampleRecording — recording state', () => {
 
     await user.click(screen.getByRole('button', { name: /stop recording/i }));
 
-    expect(onStop).toHaveBeenCalledTimes(1);
+    // Behavior shape: clicking Stop Recording forwards exactly one click event
+    // sourced from the Stop Recording button. Asserting the label guards against
+    // a regression that re-binds onStop to the wrong control (e.g. swapping it
+    // with Start) — the recorded shape would then carry the wrong label.
+    // `target` is used over `currentTarget` because React clears
+    // `currentTarget` after synthetic event dispatch.
+    const stopInvocations = onStop.mock.calls.map(
+      ([e]: [React.MouseEvent<HTMLButtonElement>]) => ({
+        type: e.type,
+        label: (e.target as HTMLElement).closest('button')?.textContent?.trim().toLowerCase(),
+      }),
+    );
+    expect(stopInvocations).toEqual([{ type: 'click', label: 'stop recording' }]);
   });
 
   it('prefers the recording UI over the file-complete UI when both are set', () => {
@@ -259,7 +283,22 @@ describe('AudioSampleRecording — file-present state', () => {
 
     await user.click(screen.getByRole('button', { name: /^play$/i }));
 
-    expect(onPlayPause).toHaveBeenCalledTimes(1);
+    // Behavior shape: clicking the play/pause icon button forwards exactly one
+    // click event. The button's aria-label encodes the current toggle state
+    // ("Play" when paused, "Pause" when playing); asserting on it guards
+    // against a regression that inverts the play/pause icon mapping.
+    // `target` is used over `currentTarget` because React clears
+    // `currentTarget` after synthetic event dispatch.
+    const playInvocations = onPlayPause.mock.calls.map(
+      ([e]: [React.MouseEvent<HTMLButtonElement>]) => ({
+        type: e.type,
+        ariaLabel: (e.target as HTMLElement)
+          .closest('button')
+          ?.getAttribute('aria-label')
+          ?.toLowerCase(),
+      }),
+    );
+    expect(playInvocations).toEqual([{ type: 'click', ariaLabel: 'play' }]);
   });
 
   it('invokes onCancel when Record Again is clicked', async () => {
@@ -280,7 +319,19 @@ describe('AudioSampleRecording — file-present state', () => {
 
     await user.click(screen.getByRole('button', { name: /record again/i }));
 
-    expect(onCancel).toHaveBeenCalledTimes(1);
+    // Behavior shape: clicking Record Again forwards exactly one click event
+    // sourced from the Record Again button. Asserting the label guards against
+    // a regression where onCancel is silently re-bound to the Play control
+    // (which would clobber a completed recording on a tap-to-preview).
+    // `target` is used over `currentTarget` because React clears
+    // `currentTarget` after synthetic event dispatch.
+    const cancelInvocations = onCancel.mock.calls.map(
+      ([e]: [React.MouseEvent<HTMLButtonElement>]) => ({
+        type: e.type,
+        label: (e.target as HTMLElement).closest('button')?.textContent?.trim().toLowerCase(),
+      }),
+    );
+    expect(cancelInvocations).toEqual([{ type: 'click', label: 'record again' }]);
   });
 });
 
@@ -310,11 +361,14 @@ describe('AudioSampleRecording — waveform microphone access', () => {
   });
 
   it('does not request microphone access when showWaveform is false', async () => {
+    // If the component were to call getUserMedia anyway, this rejection would
+    // trigger the catch branch in AudioSampleRecording and emit the
+    // "Could not access microphone" warning. We assert on those two observable
+    // side effects (no warning, no visualizer) instead of a call-count.
     installMediaDevices(async () => {
       throw new Error('should not be called');
     });
-    const getUserMedia = (navigator.mediaDevices as unknown as { getUserMedia: ReturnType<typeof vi.fn> })
-      .getUserMedia;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     render(
       <AudioSampleRecording
@@ -332,7 +386,13 @@ describe('AudioSampleRecording — waveform microphone access', () => {
 
     // Wait a microtask to let any (mistakenly scheduled) effect run.
     await Promise.resolve();
-    expect(getUserMedia).not.toHaveBeenCalled();
+    // Observable: no microphone-access warning was emitted (which would only
+    // happen if getUserMedia had been invoked and rejected).
+    const micWarnings = warnSpy.mock.calls.filter(([msg]) =>
+      typeof msg === 'string' && msg.includes('Could not access microphone'),
+    );
+    expect(micWarnings).toEqual([]);
+    // Observable: nothing in the DOM consumes a captured stream.
     expect(screen.queryByTestId('waveform-visualizer')).not.toBeInTheDocument();
   });
 
@@ -377,8 +437,17 @@ describe('AudioSampleRecording — waveform microphone access', () => {
       />,
     );
 
+    // Observable shape: when getUserMedia rejects, AudioSampleRecording's catch
+    // branch must surface a console warning whose message includes the
+    // "Could not access microphone" prefix and whose payload is the rejection
+    // error — so an operator reading logs can attribute the failure.
     await waitFor(() => {
-      expect(warnSpy).toHaveBeenCalled();
+      const micWarning = warnSpy.mock.calls.find(([msg]) =>
+        typeof msg === 'string' && msg.includes('Could not access microphone'),
+      );
+      expect(micWarning).toBeDefined();
+      expect(micWarning?.[1]).toBeInstanceOf(Error);
+      expect((micWarning?.[1] as Error).message).toBe('denied');
     });
     expect(screen.queryByTestId('waveform-visualizer')).not.toBeInTheDocument();
   });
@@ -411,6 +480,10 @@ describe('AudioSampleRecording — waveform microphone access', () => {
       unmount();
     });
 
-    expect(stopTrack).toHaveBeenCalledTimes(1);
+    // Observable shape on the MediaStreamTrack boundary: the track must be
+    // released exactly once, with no arguments (MediaStreamTrack.stop() is
+    // parameterless per spec). Releasing twice would throw in real browsers;
+    // not releasing leaks the microphone capture indicator.
+    expect(stopTrack.mock.calls).toEqual([[]]);
   });
 });
