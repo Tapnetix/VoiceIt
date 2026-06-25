@@ -650,20 +650,8 @@ def test_delete_avatar_removes_it(client):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "BUG ESCALATION (U-py-012): backend/routes/profiles.py:307 catches "
-        "``except Exception`` after the explicit ``raise HTTPException(404, "
-        "'Profile not found')`` at line 290. Because HTTPException is a "
-        "subclass of Exception, the 404 is swallowed and re-raised as a "
-        "500 with detail='404: Profile not found'. The intended behavior "
-        "(per the explicit raise) is a 404. Fix: narrow the catch-all to "
-        "``except Exception`` *after* re-raising HTTPException, e.g. "
-        "``except HTTPException: raise`` before ``except Exception``."
-    ),
-    strict=True,
-)
 def test_export_profile_returns_404_when_missing(client):
+    """GET /profiles/{id}/export returns 404 (not 500) when the profile doesn't exist."""
     r = client.get(f"/profiles/{uuid.uuid4()}/export")
     assert r.status_code == 404
 
