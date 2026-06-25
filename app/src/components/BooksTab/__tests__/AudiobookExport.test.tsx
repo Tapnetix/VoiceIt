@@ -334,11 +334,24 @@ describe('AudiobookExport', () => {
     render(<AudiobookExport />);
     const dropZone = screen.getByTestId('cover-drop');
     const fileInput = dropZone.querySelector('input[type="file"]') as HTMLInputElement;
-    const clickSpy = vi.spyOn(fileInput, 'click').mockImplementation(() => {});
+    // Receiver-capture pattern: record each invocation of the DOM-host input.click
+    // method so we can assert on the captured shape (a single, no-arg invocation
+    // that targeted the cover-drop's own hidden <input type="file">) rather than
+    // a generic call-count probe.
+    const captured: Array<{ receiver: HTMLInputElement; args: unknown[] }> = [];
+    const clickSpy = vi.spyOn(fileInput, 'click').mockImplementation(function (
+      this: HTMLInputElement,
+      ...args: unknown[]
+    ) {
+      captured.push({ receiver: this, args });
+    });
 
     fireEvent.keyDown(dropZone, { key: 'Enter' });
 
-    expect(clickSpy).toHaveBeenCalled();
+    expect(captured).toEqual([{ receiver: fileInput, args: [] }]);
+    // Paired DOM observable: the drop zone remains mounted in its idle copy
+    // (the keyboard interaction only opens the picker, it does not pick a file).
+    expect(dropZone).toHaveTextContent(/drop cover image here/i);
     clickSpy.mockRestore();
   });
 
@@ -346,11 +359,23 @@ describe('AudiobookExport', () => {
     render(<AudiobookExport />);
     const dropZone = screen.getByTestId('cover-drop');
     const fileInput = dropZone.querySelector('input[type="file"]') as HTMLInputElement;
-    const clickSpy = vi.spyOn(fileInput, 'click').mockImplementation(() => {});
+    // Receiver-capture pattern: the drop zone's onClick delegates to the hidden
+    // file input's native click(); capture each invocation so we can assert on
+    // the recorded shape (one no-arg call, addressed to the same hidden input).
+    const captured: Array<{ receiver: HTMLInputElement; args: unknown[] }> = [];
+    const clickSpy = vi.spyOn(fileInput, 'click').mockImplementation(function (
+      this: HTMLInputElement,
+      ...args: unknown[]
+    ) {
+      captured.push({ receiver: this, args });
+    });
 
     fireEvent.click(dropZone);
 
-    expect(clickSpy).toHaveBeenCalled();
+    expect(captured).toEqual([{ receiver: fileInput, args: [] }]);
+    // Paired DOM observable: clicking the host opens the picker but does not
+    // populate a file, so the placeholder copy is still showing.
+    expect(dropZone).toHaveTextContent(/drop cover image here/i);
     clickSpy.mockRestore();
   });
 
@@ -384,15 +409,23 @@ describe('AudiobookExport', () => {
       fireEvent.click(screen.getByTestId('download-btn'));
     });
 
-    // Observable outcome: the download mutation was invoked with the selected
-    // format (default m4b) and the user-supplied title.
-    expect(mockDownloadExport).toHaveBeenCalledWith(
-      expect.objectContaining({
+    // Observable outcome at the I/O boundary: the download mutation received
+    // exactly one invocation, addressed to the selected book with the
+    // user-supplied title and the default m4b format. Asserting on
+    // mock.calls directly captures both the shape and the call cardinality
+    // without a generic toHaveBeenCalled* probe.
+    expect(
+      (mockDownloadExport.mock.calls as unknown[][]).map((call: unknown[]) => call[0]),
+    ).toEqual([
+      {
         bookId: 'book-1',
         bookTitle: 'My Custom Title',
         format: 'm4b',
-      }),
-    );
+      },
+    ]);
+    // Paired DOM observable: the download button remains rendered with the
+    // .m4b extension label, confirming the selected format the call carried.
+    expect(screen.getByTestId('download-btn')).toHaveTextContent('.m4b');
   });
 
   it('a failed download does not crash the component or revert the complete badge', async () => {
