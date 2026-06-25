@@ -118,7 +118,7 @@ describe('VoiceEditor (Clone)', () => {
     expect(previewBtns.length).toBeGreaterThan(0);
   });
 
-  it('calls createClone with bookId, charId, name, and file', async () => {
+  it('uploads the trimmed sample tied to the current book and character when cloning', async () => {
     const u = userEvent.setup();
     render(<VoiceEditor initialTab="clone" />);
     const trimmedFile = new File([new Uint8Array(8)], 'trimmed-sample.wav', { type: 'audio/wav' });
