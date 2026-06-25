@@ -10,11 +10,11 @@ import { ChapterEditor } from '@/components/BooksTab/ChapterEditor';
 //
 // T2-11 audit-improve: the mutation hooks remain mocked (their HTTP boundary is
 // the only practical seam — the project does not yet ship MSW handlers for the
-// segment endpoints), but the tests no longer rely on `toHaveBeenCalled*` to
-// prove behaviour. Every assertion targets a user-visible outcome rendered by
-// ChapterEditor: the emotion pill label, the intensity readout in the popover,
-// the "Previewing…" disabled button state, the active-preset styling, or the
-// delivery input value.
+// segment endpoints), but the tests no longer rely on spy call-count checks
+// to prove behaviour. Every assertion targets a user-visible outcome rendered
+// by ChapterEditor: the emotion pill label, the intensity readout in the
+// popover, the "Previewing…" disabled button state, the active-preset
+// styling, or the delivery input value.
 
 const updateMutate = vi.fn();
 
