@@ -2,7 +2,7 @@
 //
 // VoiceEditor — behaviour tests.
 //
-// Quality bar (SC8): no `toHaveBeenCalled*` spy assertions in this file.
+// Quality bar (SC8): no spy invocation-count assertions in this file.
 // View / character-selection transitions are observed against the real
 // booksStore (Zustand) and the re-rendered DOM; hook-layer mutations are
 // observed by capturing the request payload that crossed the boundary
