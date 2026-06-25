@@ -284,8 +284,14 @@ describe('ChapterEditor', () => {
     render(<ChapterEditor />);
     await u.click(screen.getByTestId('back-to-overview'));
     // The button's job is to drive the books-view state machine back to
-    // the overview surface. The observable outcome is the store transition.
-    expect(setViewMock).toHaveBeenCalledWith('overview');
+    // the overview surface. The booksStore.setView action is the I/O
+    // boundary — assert the dispatched transitions as data so the test
+    // still fails if the button mis-routes (e.g. sends 'library' or fires
+    // twice with conflicting targets), not just on a single call.
+    const setViewArgs = (setViewMock.mock.calls as unknown[][]).map(
+      (call: unknown[]) => call[0],
+    );
+    expect(setViewArgs).toEqual(['overview']);
   });
 
   it('Flagged filter shows only low-confidence dialogue segments and hides the rest', async () => {
@@ -302,10 +308,23 @@ describe('ChapterEditor', () => {
   });
 
   it('jump-{id} in the review rail selects the target segment and scrolls it into view', async () => {
-    // Spy on scrollIntoView so we can confirm the handler reached the DOM.
-    // jsdom does not implement it, so without this stub the test would crash.
-    const scrollSpy = vi.fn();
-    Element.prototype.scrollIntoView = scrollSpy as unknown as typeof Element.prototype.scrollIntoView;
+    // scrollIntoView is the DOM I/O boundary the jump handler reaches into;
+    // jsdom does not implement it, so we must install a recorder. Capture
+    // every (element, options) pair as data so we can assert the structural
+    // payload — and pair it with the downstream observable (the selected
+    // segment gains its inline outline) so the test would catch a handler
+    // that scrolls correctly but forgets to update selection state (or
+    // vice versa).
+    const scrollCalls: Array<{ targetTestId: string | null; options: unknown }> = [];
+    Element.prototype.scrollIntoView = function (
+      this: Element,
+      options?: ScrollIntoViewOptions | boolean,
+    ) {
+      scrollCalls.push({
+        targetTestId: this.getAttribute('data-testid'),
+        options,
+      });
+    } as unknown as typeof Element.prototype.scrollIntoView;
 
     const u = userEvent.setup();
     render(<ChapterEditor />);
@@ -316,15 +335,18 @@ describe('ChapterEditor', () => {
 
     await u.click(screen.getByTestId('jump-13'));
 
-    // The handler should have asked the seg-13 element to scroll into view —
-    // the user-observable jump behaviour.
-    expect(scrollSpy).toHaveBeenCalledWith({
-      behavior: 'smooth',
-      block: 'center',
-    });
+    // Structural payload at the DOM boundary: the jump handler asked the
+    // seg-13 element (and only that element) to scroll smoothly to center.
+    expect(scrollCalls).toEqual([
+      {
+        targetTestId: 'seg-13',
+        options: { behavior: 'smooth', block: 'center' },
+      },
+    ]);
 
-    // After the jump, seg-13 is the selected segment, so it picks up the
-    // inline outline style ChapterEditor applies to its highlighted line.
+    // Downstream observable: after the jump, seg-13 is the selected segment,
+    // so it picks up the inline outline style ChapterEditor applies to its
+    // highlighted line.
     const seg13After = screen.getByTestId('seg-13');
     expect(seg13After.style.outline).toMatch(/solid/);
   });
@@ -357,8 +379,16 @@ describe('ChapterEditor', () => {
     // A toast was shown to explain why nothing is playing.
     expect(toastCalls).toHaveLength(1);
     expect(String(toastCalls[0].title)).toMatch(/read along|nothing/i);
-    // Read-along never flipped on — handleReadAlongToggle returned early.
-    expect(setReadAlongMock).not.toHaveBeenCalledWith(true);
+    // Read-along playback state never flipped — handleReadAlongToggle hit
+    // the early-return branch before reaching setReadAlong, so the store
+    // boundary saw zero dispatches. Asserting on the full dispatch shape
+    // (rather than just "not called with true") catches a regression where
+    // we accidentally dispatch setReadAlong(false) — which would still leave
+    // playback off, but would no-op the audio-generation path silently.
+    const readAlongDispatches = (setReadAlongMock.mock.calls as unknown[][]).map(
+      (call: unknown[]) => call[0],
+    );
+    expect(readAlongDispatches).toEqual([]);
   });
 
   it('orders segments in the chapter view by their `order` field, regardless of incoming list order', () => {
