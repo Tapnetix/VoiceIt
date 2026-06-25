@@ -64,11 +64,17 @@ function renderCard(profile: VoiceProfileResponse, disabled?: boolean) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  // Seed the profiles list cache so we can later assert that a successful
+  // delete mutation actually causes it to be invalidated (observable side
+  // effect of useDeleteProfile.onSuccess), and that cancel/no-op flows leave
+  // the cache state untouched.
+  queryClient.setQueryData(['profiles'], [profile]);
+  const utils = render(
     <QueryClientProvider client={queryClient}>
       <ProfileCard profile={profile} disabled={disabled} />
     </QueryClientProvider>,
   );
+  return { ...utils, queryClient };
 }
 
 // Reset the persisted Zustand UI store between tests so selection state from
@@ -271,64 +277,151 @@ describe('ProfileCard action buttons', () => {
   });
 
   it('invokes the export API and saves the resulting blob through the platform filesystem', async () => {
+    // Give the export API a uniquely identifiable blob so we can verify the
+    // *same* blob makes it all the way through to the filesystem boundary —
+    // a true end-to-end data-flow assertion instead of a call-ledger check.
+    const exportedBlob = new Blob(['ZIP-CONTENT-FOR-PROFILE-1'], {
+      type: 'application/zip',
+    });
+    exportProfileFn.mockResolvedValueOnce(exportedBlob);
+
     const user = userEvent.setup();
     renderCard(buildProfile({ id: 'profile-1', name: 'My Voice' }));
 
     await user.click(screen.getByRole('button', { name: /export profile/i }));
 
+    // Wait until the platform filesystem boundary has received the save call;
+    // its arguments are the observable outcome of the whole export pipeline.
     await waitFor(() => {
-      expect(exportProfileFn).toHaveBeenCalledWith('profile-1');
+      expect(saveFileFn.mock.calls.length).toBeGreaterThan(0);
     });
-    await waitFor(() => {
-      // filename is sluggified from the profile name.
-      expect(saveFileFn).toHaveBeenCalledWith(
-        'profile-my-voice.voiceit.zip',
-        expect.any(Blob),
-        expect.arrayContaining([
-          expect.objectContaining({ extensions: expect.arrayContaining(['zip']) }),
-        ]),
-      );
-    });
+
+    const [filename, blob, filters] = saveFileFn.mock.calls[0] as [
+      string,
+      Blob,
+      Array<{ name: string; extensions: string[] }>,
+    ];
+
+    // 1. Filename shape: sluggified from the profile name we exported.
+    expect(filename).toBe('profile-my-voice.voiceit.zip');
+
+    // 2. The blob that arrives at the filesystem is exactly the blob the
+    //    export API returned — proves the API was called and its result
+    //    flowed through unmodified (subsumes the earlier "called with id"
+    //    check, since a different id would have produced a different blob).
+    expect(blob).toBe(exportedBlob);
+    expect(blob.type).toBe('application/zip');
+    expect(blob.size).toBeGreaterThan(0);
+
+    // 3. Filter spec passed to the native save dialog includes the .zip
+    //    extension under a human-readable group name.
+    expect(filters).toEqual([
+      { name: 'VoiceIt Profile', extensions: ['zip'] },
+    ]);
   });
 
   it('clicking delete opens a confirmation dialog but does not yet call the delete API', async () => {
     const user = userEvent.setup();
-    renderCard(buildProfile({ id: 'profile-1', name: 'My Voice' }));
+    const { queryClient } = renderCard(buildProfile({ id: 'profile-1', name: 'My Voice' }));
+    // Snapshot the freshly-seeded profiles cache so we can confirm the
+    // mutation's onSuccess invalidation has NOT yet fired.
+    const profilesStateBefore = queryClient.getQueryState(['profiles']);
 
     await user.click(screen.getByRole('button', { name: /delete profile/i }));
 
     // Dialog body includes the profile name.
-    expect(await screen.findByText(/Are you sure you want to delete "My Voice"/i)).toBeInTheDocument();
-    expect(deleteProfileFn).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(/Are you sure you want to delete "My Voice"/i),
+    ).toBeInTheDocument();
+
+    // Observable signs the delete has not yet been confirmed:
+    //  - The destructive button still reads its pre-pending label ("Delete"),
+    //    not the "Deleting..." in-flight label that useDeleteProfile.isPending
+    //    would flip it to.
+    const destructive = screen.getByRole('button', { name: /^delete$/i });
+    expect(destructive).toBeEnabled();
+    expect(destructive).toHaveTextContent(/^Delete$/);
+
+    //  - The cancel control is still present (would be unmounted if the
+    //    dialog had closed because of a successful delete).
+    expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument();
+
+    //  - The profiles cache was not invalidated (delete's onSuccess effect
+    //    has not run — proves the network call did not complete).
+    const profilesStateAfter = queryClient.getQueryState(['profiles']);
+    expect(profilesStateAfter?.dataUpdatedAt).toBe(profilesStateBefore?.dataUpdatedAt);
+    expect(profilesStateAfter?.isInvalidated).toBe(false);
   });
 
-  it('confirming the delete dialog calls the delete API with the profile id', async () => {
+  it('confirming the delete dialog removes the profile via the API and invalidates the cached profiles list', async () => {
+    // Track which id the API actually received and stall the resolution
+    // until we assert on it, so we can verify the call-argument shape via
+    // the captured value rather than the spy's call ledger.
+    let receivedId: string | undefined;
+    let resolveDelete!: () => void;
+    deleteProfileFn.mockImplementationOnce(async (id: string) => {
+      receivedId = id;
+      await new Promise<void>((resolve) => {
+        resolveDelete = resolve;
+      });
+    });
+
     const user = userEvent.setup();
-    renderCard(buildProfile({ id: 'profile-1' }));
+    const { queryClient } = renderCard(buildProfile({ id: 'profile-1' }));
 
     await user.click(screen.getByRole('button', { name: /delete profile/i }));
-
     const confirmBtn = await screen.findByRole('button', { name: /^delete$/i });
     await user.click(confirmBtn);
 
+    // Wait for the mutation to dispatch into the API boundary.
     await waitFor(() => {
-      expect(deleteProfileFn).toHaveBeenCalledWith('profile-1');
+      expect(receivedId).toBe('profile-1');
+    });
+
+    // Let the mutation settle so onSuccess can run.
+    resolveDelete();
+
+    // Observable end-state: the profiles list query is invalidated, which
+    // is what triggers consumer components (ProfileList, sidebar, etc.) to
+    // refetch and observe the removed profile. This is the user-visible
+    // effect of a successful delete — strictly stronger than asserting
+    // "the spy was called".
+    await waitFor(() => {
+      const state = queryClient.getQueryState(['profiles']);
+      expect(state?.isInvalidated).toBe(true);
     });
   });
 
-  it('cancelling the delete dialog does not call the delete API', async () => {
+  it('cancelling the delete dialog closes it and leaves the profiles cache untouched', async () => {
     const user = userEvent.setup();
-    renderCard(buildProfile({ id: 'profile-1' }));
+    const { queryClient } = renderCard(buildProfile({ id: 'profile-1' }));
+    const profilesStateBefore = queryClient.getQueryState(['profiles']);
 
     await user.click(screen.getByRole('button', { name: /delete profile/i }));
 
     const cancelBtn = await screen.findByRole('button', { name: /cancel/i });
     await user.click(cancelBtn);
 
+    // Dialog closes — both the confirmation copy and the destructive
+    // "Delete" button disappear from the DOM (the latter is the most
+    // specific proof: the only remaining "delete profile" surface is the
+    // outer card's CircleButton, not a "Delete" submit button).
     await waitFor(() => {
-      expect(screen.queryByText(/Are you sure you want to delete/i)).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Are you sure you want to delete/i),
+      ).not.toBeInTheDocument();
     });
-    expect(deleteProfileFn).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
+
+    // Profiles cache is in exactly the state we seeded — no invalidation
+    // happened, which is what consumers of useProfiles would observe.
+    const profilesStateAfter = queryClient.getQueryState(['profiles']);
+    expect(profilesStateAfter?.dataUpdatedAt).toBe(profilesStateBefore?.dataUpdatedAt);
+    expect(profilesStateAfter?.isInvalidated).toBe(false);
+    // The cached payload itself is unchanged (still the seeded list).
+    expect(queryClient.getQueryData(['profiles'])).toEqual([
+      expect.objectContaining({ id: 'profile-1' }),
+    ]);
   });
 });
 
