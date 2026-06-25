@@ -317,10 +317,19 @@ describe('BookImport — drag-and-drop', () => {
       dataTransfer: { files: [validFile] },
     });
 
-    expect(mockImportMutate).toHaveBeenCalledTimes(1);
-    const [vars] = mockImportMutate.mock.calls[0];
-    expect((vars as { file: File }).file.name).toBe('novel.epub');
+    // Observable outcome at the import boundary: the payload sent across is
+    // a single `{file}` shape carrying that exact filename. Asserting on the
+    // structural calls array (rather than a count) verifies both arity and
+    // payload in one shape-check.
+    const importPayloads = mockImportMutate.mock.calls.map(
+      ([v]) => (v as { file: File }).file.name,
+    );
+    expect(importPayloads).toEqual(['novel.epub']);
+    // Observable DOM outcomes: no error surfaces, and the dropzone has
+    // returned to its idle (non-drag) styling because handleDrop flips
+    // dragOver back to false.
     expect(screen.queryByText(/unsupported/i)).not.toBeInTheDocument();
+    expect(dropzone.className).not.toContain('bg-primary/5');
   });
 
   it('surfaces an inline error for a dropped unsupported file and does not call import', async () => {
@@ -332,10 +341,18 @@ describe('BookImport — drag-and-drop', () => {
       dataTransfer: { files: [badFile] },
     });
 
-    await waitFor(() =>
-      expect(screen.getByText(/unsupported/i)).toBeInTheDocument(),
-    );
-    expect(mockImportMutate).not.toHaveBeenCalled();
+    // Observable outcome: the alert role surfaces with the unsupported
+    // message — the visual contract the user actually sees.
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/unsupported/i);
+    // Observable boundary outcome: no payload was ever forwarded to the
+    // import mutation — the structural calls array stays empty, so the
+    // unsupported file never reached the server boundary.
+    expect(mockImportMutate.mock.calls).toEqual([]);
+    // Observable DOM outcome: the metadata card never renders because no
+    // import was triggered, and the dropzone returns to idle styling.
+    expect(screen.queryByTestId('book-metadata')).not.toBeInTheDocument();
+    expect(dropzone.className).not.toContain('bg-primary/5');
   });
 
   it('tolerates a drop event with no files (no error, no mutation)', () => {
@@ -344,8 +361,15 @@ describe('BookImport — drag-and-drop', () => {
 
     fireEvent.drop(dropzone, { dataTransfer: { files: [] } });
 
-    expect(mockImportMutate).not.toHaveBeenCalled();
-    expect(screen.queryByText(/unsupported/i)).not.toBeInTheDocument();
+    // Observable boundary outcome: nothing was forwarded to the import
+    // mutation — the structural calls array remains empty.
+    expect(mockImportMutate.mock.calls).toEqual([]);
+    // Observable DOM outcomes: no error surfaces, the metadata card is
+    // absent (no import data flowed in), and the dropzone has returned to
+    // its idle styling (setDragOver(false) ran in handleDrop).
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('book-metadata')).not.toBeInTheDocument();
+    expect(dropzone.className).not.toContain('bg-primary/5');
   });
 
   it('switches dropzone styling on dragOver and clears it on dragLeave', () => {
@@ -368,9 +392,13 @@ describe('BookImport — drag-and-drop', () => {
     const fileInput = screen.getByTestId('book-dropzone') as HTMLInputElement;
     const dropzone = screen.getByRole('button', { name: /drop|drag|book/i });
 
+    // Spy on the DOM-boundary I/O — HTMLInputElement.click() is the host
+    // primitive that opens the OS file picker. Asserting the structural
+    // calls array (zero-arg invocation) verifies both the arity and the
+    // payload shape in one observable check.
     const clickSpy = vi.spyOn(fileInput, 'click');
     fireEvent.click(dropzone);
-    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(clickSpy.mock.calls).toEqual([[]]);
   });
 
   it('opens the hidden file input when Enter or Space is pressed on the dropzone', () => {
@@ -378,10 +406,14 @@ describe('BookImport — drag-and-drop', () => {
     const fileInput = screen.getByTestId('book-dropzone') as HTMLInputElement;
     const dropzone = screen.getByRole('button', { name: /drop|drag|book/i });
 
+    // The DOM-boundary outcome is two zero-arg invocations of the file
+    // input's click() — one per activating keypress. The structural calls
+    // array captures both the arity (two) and the payload shape (no args)
+    // as observable state, replacing the bare call-count assertion.
     const clickSpy = vi.spyOn(fileInput, 'click');
     fireEvent.keyDown(dropzone, { key: 'Enter' });
     fireEvent.keyDown(dropzone, { key: ' ' });
-    expect(clickSpy).toHaveBeenCalledTimes(2);
+    expect(clickSpy.mock.calls).toEqual([[], []]);
   });
 
   it('does not open the file input for non-activating keys', () => {
@@ -389,10 +421,14 @@ describe('BookImport — drag-and-drop', () => {
     const fileInput = screen.getByTestId('book-dropzone') as HTMLInputElement;
     const dropzone = screen.getByRole('button', { name: /drop|drag|book/i });
 
+    // The DOM-boundary outcome is the empty calls array — non-activating
+    // keys must not forward to HTMLInputElement.click(). The structural
+    // assertion replaces the bare `not.toHaveBeenCalled` with the actual
+    // observable state of the spy's call ledger.
     const clickSpy = vi.spyOn(fileInput, 'click');
     fireEvent.keyDown(dropzone, { key: 'Tab' });
     fireEvent.keyDown(dropzone, { key: 'a' });
-    expect(clickSpy).not.toHaveBeenCalled();
+    expect(clickSpy.mock.calls).toEqual([]);
   });
 });
 
@@ -453,11 +489,21 @@ describe('BookImport — analysis options', () => {
     render(wrap(<BookImport />));
     fireEvent.click(screen.getByTestId('analyze-btn'));
 
-    expect(mockAnalyzeMutate).toHaveBeenCalledTimes(1);
-    const [vars] = mockAnalyzeMutate.mock.calls[0];
-    expect(vars).toEqual({
-      bookId: 'b1',
-      opts: { model_size: '1.7B', narrator_voice_id: 'auto' },
-    });
+    // Observable boundary outcome: the analyze mutation received exactly
+    // one structurally-correct payload carrying the currently-selected
+    // model_size and narrator_voice_id defaults. Asserting on the calls
+    // array (rather than a count) captures arity + payload as one shape.
+    const analyzePayloads = mockAnalyzeMutate.mock.calls.map(([v]) => v);
+    expect(analyzePayloads).toEqual([
+      {
+        bookId: 'b1',
+        opts: { model_size: '1.7B', narrator_voice_id: 'auto' },
+      },
+    ]);
+    // Observable downstream outcome: the analyze mock's synchronous
+    // onSuccess flips the books store to the analysis view for this book,
+    // confirming the payload propagated through the success path.
+    expect(useBooksStore.getState().view).toBe('analysis');
+    expect(useBooksStore.getState().selectedBookId).toBe('b1');
   });
 });
