@@ -131,10 +131,13 @@ describe('AudioSampleRecording — idle state', () => {
     // We read `target` rather than `currentTarget` because React nulls out
     // `currentTarget` after the synthetic event is dispatched.
     const startInvocations = onStart.mock.calls.map(
-      ([e]: [React.MouseEvent<HTMLButtonElement>]) => ({
-        type: e.type,
-        label: (e.target as HTMLElement).closest('button')?.textContent?.trim().toLowerCase(),
-      }),
+      (call: unknown[]) => {
+        const e = call[0] as React.MouseEvent<HTMLButtonElement>;
+        return {
+          type: e.type,
+          label: (e.target as HTMLElement).closest('button')?.textContent?.trim().toLowerCase(),
+        };
+      },
     );
     expect(startInvocations).toEqual([{ type: 'click', label: 'start recording' }]);
   });
@@ -192,10 +195,13 @@ describe('AudioSampleRecording — recording state', () => {
     // `target` is used over `currentTarget` because React clears
     // `currentTarget` after synthetic event dispatch.
     const stopInvocations = onStop.mock.calls.map(
-      ([e]: [React.MouseEvent<HTMLButtonElement>]) => ({
-        type: e.type,
-        label: (e.target as HTMLElement).closest('button')?.textContent?.trim().toLowerCase(),
-      }),
+      (call: unknown[]) => {
+        const e = call[0] as React.MouseEvent<HTMLButtonElement>;
+        return {
+          type: e.type,
+          label: (e.target as HTMLElement).closest('button')?.textContent?.trim().toLowerCase(),
+        };
+      },
     );
     expect(stopInvocations).toEqual([{ type: 'click', label: 'stop recording' }]);
   });
@@ -289,15 +295,16 @@ describe('AudioSampleRecording — file-present state', () => {
     // against a regression that inverts the play/pause icon mapping.
     // `target` is used over `currentTarget` because React clears
     // `currentTarget` after synthetic event dispatch.
-    const playInvocations = onPlayPause.mock.calls.map(
-      ([e]: [React.MouseEvent<HTMLButtonElement>]) => ({
+    const playInvocations = onPlayPause.mock.calls.map((call: unknown[]) => {
+      const e = call[0] as React.MouseEvent<HTMLButtonElement>;
+      return {
         type: e.type,
         ariaLabel: (e.target as HTMLElement)
           .closest('button')
           ?.getAttribute('aria-label')
           ?.toLowerCase(),
-      }),
-    );
+      };
+    });
     expect(playInvocations).toEqual([{ type: 'click', ariaLabel: 'play' }]);
   });
 
@@ -326,10 +333,13 @@ describe('AudioSampleRecording — file-present state', () => {
     // `target` is used over `currentTarget` because React clears
     // `currentTarget` after synthetic event dispatch.
     const cancelInvocations = onCancel.mock.calls.map(
-      ([e]: [React.MouseEvent<HTMLButtonElement>]) => ({
-        type: e.type,
-        label: (e.target as HTMLElement).closest('button')?.textContent?.trim().toLowerCase(),
-      }),
+      (call: unknown[]) => {
+        const e = call[0] as React.MouseEvent<HTMLButtonElement>;
+        return {
+          type: e.type,
+          label: (e.target as HTMLElement).closest('button')?.textContent?.trim().toLowerCase(),
+        };
+      },
     );
     expect(cancelInvocations).toEqual([{ type: 'click', label: 'record again' }]);
   });
