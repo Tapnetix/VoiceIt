@@ -219,11 +219,27 @@ describe('useBookProgress', () => {
     renderHook(() => useBookProgress('b1', makeCapturingHandlers(captured)));
     const source = FakeEventSource.instances[0];
 
-    // ready/ping heartbeats arrive as opaque non-JSON strings.
-    expect(() => source.pushMessage('ready')).not.toThrow();
-    expect(() => source.pushMessage('ping')).not.toThrow();
+    // ready/ping heartbeats arrive as opaque non-JSON strings. They must be
+    // absorbed without poisoning the listener for subsequent real events.
+    source.pushMessage('ready');
+    source.pushMessage('ping');
 
+    // After absorbing heartbeats, no consumer channel has fired.
     expect(captured).toEqual([]);
+
+    // A real contract-04 event arriving AFTER the heartbeats is still routed
+    // intact — proving the heartbeat-handling path did not detach onmessage,
+    // null out the handler ref, or otherwise corrupt the listener state.
+    const realEvent: BookProgressEvent = {
+      type: 'analysis_complete',
+      character_count: 2,
+      chapter_count: 5,
+    };
+    source.pushMessage(realEvent);
+
+    expect(captured).toEqual([
+      { channel: 'onAnalysisComplete', payload: realEvent },
+    ]);
     expect(source.closed).toBe(false);
   });
 
@@ -260,10 +276,37 @@ describe('useBookProgress', () => {
   });
 
   it('absorbs transport errors safely when the consumer registered no onError handler', () => {
-    renderHook(() => useBookProgress('b1', {}));
+    // The consumer subscribes only to analysis_complete — no onError handler.
+    // A transport error must be absorbed cleanly: the stream stays open AND
+    // the message-routing path is still live for any subsequent real events.
+    const captured: CapturedEvent[] = [];
+    renderHook(() =>
+      useBookProgress('b1', {
+        onAnalysisComplete: (e) => captured.push({ channel: 'onAnalysisComplete', payload: e }),
+      }),
+    );
     const source = FakeEventSource.instances[0];
 
-    expect(() => source.pushTransportError()).not.toThrow();
+    source.pushTransportError();
+
+    // No onError handler was registered, so nothing should have been captured
+    // — the synthesised connection error has nowhere to go and is dropped.
+    expect(captured).toEqual([]);
+    // Connection is kept open so the browser can auto-reconnect.
     expect(source.closed).toBe(false);
+
+    // After the error, a normal event is still delivered to its handler —
+    // proving the transport-error path did not tear down or null the
+    // listeners and did not break the handlers ref.
+    const realEvent: BookProgressEvent = {
+      type: 'analysis_complete',
+      character_count: 1,
+      chapter_count: 1,
+    };
+    source.pushMessage(realEvent);
+
+    expect(captured).toEqual([
+      { channel: 'onAnalysisComplete', payload: realEvent },
+    ]);
   });
 });
