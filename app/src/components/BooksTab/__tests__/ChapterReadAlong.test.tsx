@@ -237,7 +237,7 @@ describe('ChapterReadAlong — headless playback-to-segment observer', () => {
     expect(useBooksStore.getState().currentSpokenSegmentId).toBeNull();
   });
 
-  it('calls scrollIntoView on the seg-{id} element when the playhead advances and an active segment exists', () => {
+  it('smoothly scrolls the active segment node into view (centered) when the playhead advances', () => {
     // Install a DOM node carrying the data-testid the observer queries for,
     // with a spy on scrollIntoView. The component looks up by attribute and
     // calls scrollIntoView on every currentTimeMs change once an active id
@@ -266,13 +266,36 @@ describe('ChapterReadAlong — headless playback-to-segment observer', () => {
   });
 
   it('skips scrollIntoView when no DOM node matches the active seg-{id} (graceful no-op)', () => {
-    // No seg-{id} element exists in the DOM. The component should not throw
-    // — querySelector returns null and the conditional skips the call.
-    useStoryStore.setState({ currentTimeMs: 500 });
-    expect(() =>
-      render(<ChapterReadAlong story={makeStory()} segments={[seg12, seg13]} />),
-    ).not.toThrow();
-    // And the active id was still set so the visual highlight still works.
-    expect(useBooksStore.getState().currentSpokenSegmentId).toBe('12');
+    // The active id resolves to seg-12 at currentTimeMs=500, but the DOM only
+    // contains a node for a DIFFERENT segment (seg-99). The observer must
+    // querySelector by the active id, find no match, and skip the scroll —
+    // it must NOT fall back to scrolling some other node, and it must still
+    // publish the active id so the segment-highlight UI keeps working.
+    const decoyScrollSpy = vi.fn();
+    const decoy = document.createElement('div');
+    decoy.setAttribute('data-testid', 'seg-99');
+    (decoy as unknown as HTMLElement & { scrollIntoView: typeof decoyScrollSpy }).scrollIntoView = decoyScrollSpy;
+    document.body.appendChild(decoy);
+
+    try {
+      useStoryStore.setState({ currentTimeMs: 500 });
+      render(<ChapterReadAlong story={makeStory()} segments={[seg12, seg13]} />);
+      // Advance the playhead so the scroll effect re-runs at least once with
+      // an active id populated in the ref.
+      setCurrentTimeMs(800);
+
+      // Concrete post-condition #1: the unrelated DOM node was never touched.
+      expect(decoyScrollSpy).not.toHaveBeenCalled();
+      // Concrete post-condition #2: no seg-12 element ever materialised in
+      // the DOM (so we know the no-op branch was actually exercised — there
+      // was genuinely nothing for querySelector to find).
+      expect(document.querySelector('[data-testid="seg-12"]')).toBeNull();
+      // Concrete post-condition #3: the active id was still published so the
+      // visual highlight pipeline (which reads booksStore directly) still
+      // works even when no DOM node is mounted yet.
+      expect(useBooksStore.getState().currentSpokenSegmentId).toBe('12');
+    } finally {
+      decoy.remove();
+    }
   });
 });
