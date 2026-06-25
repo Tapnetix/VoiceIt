@@ -16,8 +16,8 @@ import { useBooksStore } from '@/stores/booksStore';
 
 // Records of calls landing at the apiClient layer. Tests assert against
 // these arrays to verify the network contract (URL params + body shape)
-// without resorting to `toHaveBeenCalled*` spy matchers on first-party
-// hook layers.
+// via behavior-shape checks on the captured request payloads — never
+// via spy call-count matchers on first-party hook layers.
 const mergeCalls: Array<{ bookId: string; charId: string; data: { source_char_id: string } }> = [];
 const deleteCalls: Array<{ bookId: string; charId: string }> = [];
 const generateCalls: Array<{ bookId: string; chapterId: string; data?: unknown }> = [];
