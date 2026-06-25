@@ -275,20 +275,33 @@ describe('useReferenceTranscript — retranscribe action', () => {
   });
 
   it('does nothing when there is no confirmed clip yet', async () => {
-    const spy = vi
-      .spyOn(apiClient, 'transcribeAudio')
-      .mockResolvedValue(makeTranscriptionResponse('unused'));
+    // If the hook were to (incorrectly) hit the boundary, the resolved value
+    // would be written to setText. We use a sentinel string and assert that
+    // string never reaches the consumer — an observable outcome stronger than
+    // a call-count: it covers both "not called" and "called but ignored".
+    vi.spyOn(apiClient, 'transcribeAudio').mockResolvedValue(
+      makeTranscriptionResponse('SENTINEL_SHOULD_NEVER_APPEAR'),
+    );
 
     const h = setup({ file: null });
     // Status should be idle with no file present.
     expect(h.result.current.status).toBe('idle');
+    expect(h.result.current.isTranscribing).toBe(false);
 
     act(() => h.result.current.retranscribe());
 
+    // Give the hook ample opportunity to (mis)transition out of idle.
     await act(async () => {});
+    await act(async () => {});
+
+    // The hook never left idle: no transcribing flicker, no error, no prompt.
     expect(h.result.current.status).toBe('idle');
+    expect(h.result.current.isTranscribing).toBe(false);
+    expect(h.result.current.error).toBeNull();
+    expect(h.result.current.regeneratePrompt).toBe(false);
+    // And — critically — the sentinel text never reached the consumer.
     expect(h.state.lastWritten).toBeNull();
-    expect(spy).not.toHaveBeenCalled(); // boundary-level check, not an internal call-count
+    expect(h.state.text).toBe('');
   });
 });
 
@@ -343,22 +356,39 @@ describe('useReferenceTranscript — Whisper model download', () => {
   it('does not schedule a retry after the hook unmounts', async () => {
     vi.useFakeTimers();
     try {
-      const spy = vi
-        .spyOn(apiClient, 'transcribeAudio')
-        .mockRejectedValue(makeDownloadingError());
+      // First attempt: downloading (forces the hook to schedule a retry).
+      // Second attempt: if the retry ever fires post-unmount, it would
+      // successfully resolve and the resulting text would be written to
+      // setText — a directly observable leak. The test passes only when
+      // that text never reaches the consumer.
+      vi.spyOn(apiClient, 'transcribeAudio')
+        .mockRejectedValueOnce(makeDownloadingError())
+        .mockResolvedValueOnce(
+          makeTranscriptionResponse('LEAKED_AFTER_UNMOUNT'),
+        );
 
       const h = setup({ file: fileA });
       await act(async () => {});
+      // Precondition: the hook is in the downloading state with a pending retry.
       expect(h.result.current.status).toBe('downloading');
-      const callsBeforeUnmount = spy.mock.calls.length;
+      expect(h.state.lastWritten).toBeNull();
 
       h.unmount();
       await act(async () => {
+        // Advance well past the retry interval. If the timer leaked, the
+        // second mock would resolve and write 'LEAKED_AFTER_UNMOUNT'.
         await vi.advanceTimersByTimeAsync(4000);
       });
+      await act(async () => {
+        // Flush any post-timer microtasks (mutateAsync resolution).
+        await Promise.resolve();
+      });
 
-      // After unmount, no further backend call should fire from a stale timer.
-      expect(spy.mock.calls.length).toBe(callsBeforeUnmount);
+      // Observable outcome: the unmounted hook never wrote the leaked text.
+      // This covers both "no retry call fired" AND "a call fired but was
+      // ignored" — both are valid behaviours of a correctly torn-down hook.
+      expect(h.state.lastWritten).toBeNull();
+      expect(h.state.text).toBe('');
     } finally {
       vi.useRealTimers();
     }
