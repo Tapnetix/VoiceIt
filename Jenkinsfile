@@ -117,7 +117,6 @@ pipeline {
                             # config under [tool.coverage.run] when invoked from
                             # the repo root).
                             backend/venv/bin/python -m pytest backend/tests \\
-                                --ignore=backend/tests/test_profile_duplicate_names.py \\
                                 --cov=backend \\
                                 --cov-config=backend/pyproject.toml \\
                                 --cov-report=term \\
