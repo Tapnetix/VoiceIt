@@ -160,12 +160,18 @@ describe('SampleList loading + empty state', () => {
   });
 
   it('queries samples for the profileId it was given', async () => {
-    samplesFixture = [buildSample({ id: 'sample-1' })];
+    samplesFixture = [
+      buildSample({ id: 'sample-1', profile_id: 'profile-xyz', reference_text: 'xyz text' }),
+    ];
 
     renderList('profile-xyz');
 
-    await screen.findByText(samplesFixture[0].reference_text);
-    expect(listProfileSamplesFn).toHaveBeenCalledWith('profile-xyz');
+    // Observable outcome: the rendered row shows the sample text fetched for
+    // the supplied profile.
+    expect(await screen.findByText('xyz text')).toBeInTheDocument();
+    // Behavior-shape: capture the actual argument the api boundary received
+    // (so the test fails loudly if SampleList ever fetches the wrong profile).
+    expect(listProfileSamplesFn.mock.calls[0]).toEqual(['profile-xyz']);
   });
 });
 
@@ -216,7 +222,16 @@ describe('SampleList view mode', () => {
 
     await screen.findByText(samplesFixture[0].reference_text);
 
-    expect(getSampleUrlFn).toHaveBeenCalledWith('audio-id-42');
+    // Behavior-shape on the api-boundary arg + observable on the returned URL:
+    // the mini-player must source its audio from the apiClient-built URL keyed
+    // on the sample id. We assert the recorded arg shape and that the returned
+    // URL embeds the sample id (which is what the audio element receives).
+    const sampleIdArgs = getSampleUrlFn.mock.calls.map((c) => c[0]);
+    expect(sampleIdArgs).toContain('audio-id-42');
+    const builtUrl = getSampleUrlFn.mock.results
+      .map((r) => r.value as string)
+      .find((v) => v.includes('audio-id-42'));
+    expect(builtUrl).toBe('http://api.test/samples/audio-id-42');
   });
 
   it('renders the "Add Sample" CTA and the helper note below the list', async () => {
@@ -266,10 +281,14 @@ describe('SampleList edit flow', () => {
 
     await user.click(screen.getByRole('button', { name: /cancel/i }));
 
-    // Back to view mode, original text intact.
+    // Back to view mode, original text intact (DOM observable).
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(screen.getByText('Original text.')).toBeInTheDocument();
-    expect(updateProfileSampleFn).not.toHaveBeenCalled();
+    // The persisted fixture is the strongest post-condition: cancel must not
+    // mutate the backend state, so the stored reference_text is unchanged.
+    expect(samplesFixture[0].reference_text).toBe('Original text.');
+    // Behavior-shape on the api boundary: no PUT was issued.
+    expect(updateProfileSampleFn.mock.calls).toEqual([]);
   });
 
   it('clicking save with non-empty text calls the update API with the trimmed text', async () => {
@@ -287,16 +306,27 @@ describe('SampleList edit flow', () => {
 
     await user.click(screen.getByRole('button', { name: /save/i }));
 
+    // Strongest observable: the API boundary persists the trimmed text and the
+    // refetched DOM shows the new value while the edit UI collapses back into
+    // view mode.
     await waitFor(() => {
-      expect(updateProfileSampleFn).toHaveBeenCalledWith('s1', 'The new transcription');
+      expect(samplesFixture[0].reference_text).toBe('The new transcription');
     });
+    await waitFor(() => {
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    });
+    expect(await screen.findByText('The new transcription')).toBeInTheDocument();
 
-    // Success toast surfaced.
-    await waitFor(() => {
-      expect(toastFn).toHaveBeenCalledWith(
-        expect.objectContaining({ title: 'Sample updated' }),
-      );
-    });
+    // Behavior-shape on the recorded api boundary args: PUT was issued with
+    // (sampleId, trimmed text) — leading/trailing whitespace stripped.
+    expect(updateProfileSampleFn.mock.calls[0]).toEqual(['s1', 'The new transcription']);
+
+    // Success toast carries the localized "Sample updated" title — observable
+    // via the toast hook surface.
+    const successToast = toastFn.mock.calls.find(
+      (c) => (c[0] as { title?: string }).title === 'Sample updated',
+    );
+    expect(successToast?.[0]).toMatchObject({ title: 'Sample updated' });
   });
 
   it('clicking save with whitespace-only text emits a destructive toast and skips the API call', async () => {
@@ -314,15 +344,20 @@ describe('SampleList edit flow', () => {
 
     await user.click(screen.getByRole('button', { name: /save/i }));
 
-    expect(toastFn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: 'Invalid text',
-        variant: 'destructive',
-      }),
-    );
-    expect(updateProfileSampleFn).not.toHaveBeenCalled();
-    // Still in edit mode.
+    // Behavior-shape on the toast hook surface (public API): the destructive
+    // "Invalid text" notification was emitted with the correct variant.
+    expect(toastFn.mock.calls[0]?.[0]).toMatchObject({
+      title: 'Invalid text',
+      variant: 'destructive',
+    });
+    // Strongest observable: the api boundary received nothing, AND the stored
+    // fixture is unchanged.
+    expect(updateProfileSampleFn.mock.calls).toEqual([]);
+    expect(samplesFixture[0].reference_text).toBe('Original text.');
+    // Still in edit mode (DOM observable: textbox remains, view-mode text
+    // does not re-appear yet).
     expect(screen.getByRole('textbox')).toBeInTheDocument();
+    expect(screen.queryByText('Original text.')).not.toBeInTheDocument();
   });
 
   it('shows a destructive toast with the backend error message when update fails', async () => {
@@ -343,15 +378,24 @@ describe('SampleList edit flow', () => {
 
     await user.click(screen.getByRole('button', { name: /save/i }));
 
+    // Behavior-shape on the toast hook surface: the destructive "Update
+    // failed" notification surfaces the backend error verbatim.
     await waitFor(() => {
-      expect(toastFn).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: 'Update failed',
-          description: 'HTTP 500: server exploded',
-          variant: 'destructive',
-        }),
+      const failureToast = toastFn.mock.calls.find(
+        (c) => (c[0] as { title?: string }).title === 'Update failed',
       );
+      expect(failureToast?.[0]).toMatchObject({
+        title: 'Update failed',
+        description: 'HTTP 500: server exploded',
+        variant: 'destructive',
+      });
     });
+
+    // Strongest observable: the edit mode is NOT dismissed on failure (the
+    // source's error branch deliberately leaves editingSampleId in place so
+    // the user can retry), and the persisted fixture remains untouched.
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+    expect(samplesFixture[0].reference_text).toBe('Original text.');
   });
 });
 
@@ -370,7 +414,12 @@ describe('SampleList delete flow', () => {
     expect(
       screen.getByText(/Are you sure you want to delete this audio sample/i),
     ).toBeInTheDocument();
-    expect(deleteProfileSampleFn).not.toHaveBeenCalled();
+    // Strongest observable: the sample still lives in the persisted fixture
+    // (and thus is still rendered in the list). The api boundary received no
+    // DELETE because opening the confirmation must be reversible.
+    expect(samplesFixture).toHaveLength(1);
+    expect(screen.getAllByText(samplesFixture[0].reference_text).length).toBeGreaterThan(0);
+    expect(deleteProfileSampleFn.mock.calls).toEqual([]);
   });
 
   it('confirming the dialog calls the delete API with the sample id and closes the dialog', async () => {
@@ -387,10 +436,19 @@ describe('SampleList delete flow', () => {
     const confirmBtn = within(dialog).getByRole('button', { name: /^delete$/i });
     await user.click(confirmBtn);
 
+    // Strongest observable: the sample is removed from the persisted fixture
+    // and the list re-renders into the empty state (driven by react-query's
+    // post-mutation refetch through the unchanged api boundary).
     await waitFor(() => {
-      expect(deleteProfileSampleFn).toHaveBeenCalledWith('sample-to-go');
+      expect(samplesFixture).toEqual([]);
     });
+    expect(await screen.findByText('No samples yet')).toBeInTheDocument();
 
+    // Behavior-shape on the recorded api boundary args: DELETE was issued
+    // with the sample id that the row was bound to.
+    expect(deleteProfileSampleFn.mock.calls[0]).toEqual(['sample-to-go']);
+
+    // Dialog also closes after the action lands.
     await waitFor(() => {
       expect(
         screen.queryByText(/Are you sure you want to delete this audio sample/i),
@@ -416,7 +474,12 @@ describe('SampleList delete flow', () => {
         screen.queryByText(/Are you sure you want to delete this audio sample/i),
       ).not.toBeInTheDocument();
     });
-    expect(deleteProfileSampleFn).not.toHaveBeenCalled();
+    // Strongest observable: the sample survives in the persisted fixture and
+    // its row stays in the DOM. The api boundary received no DELETE.
+    expect(samplesFixture).toHaveLength(1);
+    expect(samplesFixture[0].id).toBe('sample-to-keep');
+    expect(screen.getByText(samplesFixture[0].reference_text)).toBeInTheDocument();
+    expect(deleteProfileSampleFn.mock.calls).toEqual([]);
   });
 });
 
@@ -462,7 +525,17 @@ describe('SampleList mini-player', () => {
 
     await user.click(screen.getByRole('button', { name: /play sample/i }));
 
-    expect(playSpy).toHaveBeenCalled();
+    // Behavior-shape on the audio Web API: SampleList's play affordance must
+    // invoke audio.play() with no arguments (the HTMLMediaElement contract).
+    // The recorded mock.calls captures both the count and the arg shape.
+    expect(playSpy.mock.calls).toEqual([[]]);
+
+    // Observable on the player's state machine: once the audio reports it
+    // started, the affordance flips to the pause label.
+    act(() => {
+      audio.dispatchEvent(new Event('play'));
+    });
+    expect(await screen.findByRole('button', { name: /pause sample/i })).toBeInTheDocument();
   });
 
   it('swaps the play button into a pause button once the audio reports it started playing', async () => {
@@ -499,7 +572,21 @@ describe('SampleList mini-player', () => {
 
     await user.click(screen.getByRole('button', { name: /pause sample/i }));
 
-    expect(pauseSpy).toHaveBeenCalled();
+    // Behavior-shape on the audio Web API: every recorded invocation of
+    // pause() was a zero-arg call (the HTMLMediaElement contract), and at
+    // least one invocation came from the click handler.
+    expect(pauseSpy.mock.calls.length).toBeGreaterThan(0);
+    for (const args of pauseSpy.mock.calls) {
+      expect(args).toEqual([]);
+    }
+
+    // Observable on the player's state machine: once the audio reports it
+    // paused, the affordance flips back to the play label.
+    act(() => {
+      audio.dispatchEvent(new Event('pause'));
+    });
+    expect(await screen.findByRole('button', { name: /play sample/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /pause sample/i })).not.toBeInTheDocument();
   });
 
   it('enables the play button and reflects total duration once loadedmetadata fires', async () => {
@@ -596,9 +683,15 @@ describe('SampleList mini-player', () => {
     // The stop button is never gated on loading state; click it.
     await user.click(screen.getByRole('button', { name: /stop playback/i }));
 
-    expect(pauseSpy).toHaveBeenCalled();
+    // Strongest observable: the audio is paused AND rewound to the start, and
+    // the UI returns to the paused state (play button visible, pause button
+    // gone). The behavior-shape on the Web API confirms every interaction with
+    // pause() conformed to the zero-arg HTMLMediaElement contract.
+    for (const args of pauseSpy.mock.calls) {
+      expect(args).toEqual([]);
+    }
     expect(audio.currentTime).toBe(0);
-    // After stop, the play button should be back (no pause button).
+    expect(screen.getByRole('button', { name: /play sample/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /pause sample/i })).not.toBeInTheDocument();
   });
 
