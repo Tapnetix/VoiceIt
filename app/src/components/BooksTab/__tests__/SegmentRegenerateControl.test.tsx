@@ -199,7 +199,7 @@ describe('SegmentRegenerateControl', () => {
     expect(onDone).toHaveBeenCalled();
   });
 
-  it('does not throw when the mutation succeeds and no onDone callback is supplied', async () => {
+  it('still dispatches the mutation and leaves the control rendered when no onDone callback is supplied', async () => {
     const u = userEvent.setup();
     render(
       <SegmentRegenerateControl
@@ -210,9 +210,24 @@ describe('SegmentRegenerateControl', () => {
       />,
     );
 
-    // Should not throw — onDone is optional.
-    await expect(
-      u.click(screen.getByTestId('regenerate-btn-s9')),
-    ).resolves.not.toThrow();
+    // The mock wiring fires onSuccess synchronously; if the component
+    // mishandled the optional onDone (e.g. called it unconditionally) the
+    // click would reject. We pin the *observable* contract instead of
+    // asserting "did not throw":
+    //   1. the mutation crossed the hook boundary with the correct payload,
+    //   2. the button is still mounted afterward (component did not crash),
+    //   3. the idle label is still shown (no stuck "Re-rendering…" state).
+    await u.click(screen.getByTestId('regenerate-btn-s9'));
+
+    const payload = regenerateMutate.mock.calls[0]?.[0];
+    expect(payload).toEqual({
+      segmentId: 's9',
+      bookId: 'b1',
+      chapterId: 'c1',
+    });
+
+    const btn = screen.getByTestId('regenerate-btn-s9');
+    expect(btn).toBeInTheDocument();
+    expect(btn).toHaveTextContent('↻ Regenerate');
   });
 });
