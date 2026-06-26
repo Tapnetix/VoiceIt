@@ -273,14 +273,34 @@ PYGATE
                             # without flipping Verify red. Remove the || true
                             # once known-green (planned follow-up).
                             command -v tauri-driver >/dev/null 2>&1 || cargo install tauri-driver --locked
+                            # Pre-launch the backend on :17493. The voiceit binary
+                            # has a speak_monitor task that connects to
+                            # /events/speak at boot; when the connection refuses,
+                            # the error event races the GTK main loop via a glib
+                            # channel and triggers a tao panic
+                            # (Option::unwrap on None at tao event_loop.rs:449).
+                            # In production the Tauri-bundled sidecar provides
+                            # this server; in CI we don't auto-spawn the sidecar
+                            # cleanly, so run uvicorn directly from the existing
+                            # backend/venv.
+                            backend/venv/bin/uvicorn backend.main:app --port 17493 \
+                                > /tmp/uvicorn-e2e.log 2>&1 &
+                            UVICORN_E2E_PID=$!
+                            trap "kill $UVICORN_E2E_PID 2>/dev/null || true" EXIT
+                            for _ in $(seq 1 30); do
+                                curl -s http://localhost:17493/openapi.json > /dev/null 2>&1 && break
+                                sleep 1
+                            done
+                            curl -s http://localhost:17493/openapi.json > /dev/null \
+                                || { echo "::warning::backend did not boot for tauri-e2e; the panic will reproduce"; tail -30 /tmp/uvicorn-e2e.log; }
                             # pockeo-linux is headless — Tauri/WebKit needs a
-                            # display to launch. There's a stale Xvfb running
-                            # on :99 but it's owned by another user and won't
-                            # accept connections from jenkins (no xauth). Run
-                            # our own Xvfb via xvfb-run -a so we get a fresh
-                            # display with the right credentials.
+                            # display. There's a stale Xvfb on :99 owned by
+                            # another user (no jenkins xauth). xvfb-run -a
+                            # spins up our own ephemeral display.
                             xvfb-run -a bash -c '( cd tauri/tests/webdriver && bun x vitest run )' \
                                 || echo "::warning::tauri-e2e suite failed — see log above. Non-fatal during bring-up."
+                            kill $UVICORN_E2E_PID 2>/dev/null || true
+                            trap - EXIT
                         '''
                     }
                     post {
