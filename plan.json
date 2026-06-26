@@ -23,6 +23,7 @@
       ]
     },
     "rust_exclude_files": [
+      "src/main.rs",
       "src/audio_capture/linux.rs",
       "src/audio_capture/macos.rs",
       "src/audio_capture/windows.rs",
