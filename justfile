@@ -299,9 +299,16 @@ test: _ensure-venv
 test-coverage: _ensure-venv
     {{ venv_bin }}/python -m pytest {{ backend_dir }}/tests --cov=backend --cov-config={{ backend_dir }}/pyproject.toml --cov-report=term
 
-# Run the Playwright browser E2E suite against the web build
+# Run the Playwright browser E2E suite against the web build (default surface)
 test-e2e:
     cd {{ app_dir }} && bunx playwright test
+
+# Run the real-Tauri E2E suite (audit S17a/S17b/S18-S21) against the
+# packaged Tauri binary via tauri-driver. Linux-only. Requires
+# WebKitWebDriver + tauri-driver — see app/e2e/fixtures-tauri.ts header
+# for install instructions. Throws with a clear hint if a dep is missing.
+test-e2e-tauri:
+    cd {{ app_dir }} && E2E_SURFACE=tauri bunx playwright test
 
 # E2E: generate with every TTS model against the frozen binary (pass extra flags like --only kokoro)
 [unix]
