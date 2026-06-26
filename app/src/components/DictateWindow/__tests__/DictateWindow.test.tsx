@@ -425,6 +425,61 @@ describe('DictateWindow — paste_final_text invoke pipeline', () => {
     expect(invokeCalls.filter((c) => c.cmd === 'paste_final_text')).toEqual([]);
   });
 
+  it('does NOT invoke paste_final_text when the final text is whitespace-only or empty', async () => {
+    render(<DictateWindow />);
+    await flushListens();
+
+    // Populate the focus ref so we are isolating the empty-text guard at
+    // DictateWindow.tsx:52 — not the focus guard from the same line. Without
+    // this, an empty paste would also be suppressed by the focus check and
+    // the test wouldn't prove the text-trim branch is doing the work.
+    const startReg = findListener<{ focus: FocusSnapshot | null }>('dictate:start');
+    await act(async () => {
+      startReg.handler({
+        event: 'dictate:start',
+        id: 20,
+        payload: { focus: fakeFocus },
+      });
+    });
+
+    const capture = {
+      id: 'cap-empty',
+      audio_path: '/empty.wav',
+      source: 'dictation' as const,
+      transcript_raw: '   ',
+      created_at: '2026-06-26T00:00:00Z',
+    };
+
+    // Whitespace-only: the refine pipeline returned nothing the user could
+    // actually want pasted. The paste boundary must stay untouched even
+    // though allowAutoPaste=true and a focus snapshot is available.
+    await act(async () => {
+      await lastOnFinalText!('   ', capture, true);
+    });
+
+    // Symmetry: the empty-string case must be guarded the same way. We have
+    // to re-fire dictate:start because the onFinalText callback consumes
+    // (nulls) focusRef on each invocation, so the second call would
+    // otherwise short-circuit on the focus guard instead of the text guard.
+    await act(async () => {
+      startReg.handler({
+        event: 'dictate:start',
+        id: 21,
+        payload: { focus: fakeFocus },
+      });
+    });
+    await act(async () => {
+      await lastOnFinalText!('', capture, true);
+    });
+
+    // Behavior shape at the paste boundary: across both empty-text shapes,
+    // zero paste_final_text invocations were dispatched. Asserting the
+    // filtered array (not a count or not.toHaveBeenCalled) so a regression
+    // that started forwarding empty strings to Rust — which would
+    // distinguish "no text" from a real paste of "" — surfaces here.
+    expect(invokeCalls.filter((c) => c.cmd === 'paste_final_text')).toEqual([]);
+  });
+
   it('emits system:accessibility-missing when paste_final_text rejects with an accessibility error', async () => {
     // Re-arrange the invoke mock so paste_final_text fails the way the Rust
     // side does when the app lacks Accessibility permission.
