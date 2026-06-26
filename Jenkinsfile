@@ -274,17 +274,13 @@ PYGATE
                             # once known-green (planned follow-up).
                             command -v tauri-driver >/dev/null 2>&1 || cargo install tauri-driver --locked
                             # pockeo-linux is headless — Tauri/WebKit needs a
-                            # display to launch. There's an Xvfb server running
-                            # on :99 by default on these agents (verified
-                            # 2026-06-26); fall back to wrapping in xvfb-run if
-                            # it's gone.
-                            if [ -S /tmp/.X11-unix/X99 ]; then
-                                DISPLAY=:99 bash -c '( cd tauri/tests/webdriver && bun x vitest run )' \
-                                    || echo "::warning::tauri-e2e suite failed — see log above. Non-fatal during bring-up."
-                            else
-                                xvfb-run -a bash -c '( cd tauri/tests/webdriver && bun x vitest run )' \
-                                    || echo "::warning::tauri-e2e suite failed — see log above. Non-fatal during bring-up."
-                            fi
+                            # display to launch. There's a stale Xvfb running
+                            # on :99 but it's owned by another user and won't
+                            # accept connections from jenkins (no xauth). Run
+                            # our own Xvfb via xvfb-run -a so we get a fresh
+                            # display with the right credentials.
+                            xvfb-run -a bash -c '( cd tauri/tests/webdriver && bun x vitest run )' \
+                                || echo "::warning::tauri-e2e suite failed — see log above. Non-fatal during bring-up."
                         '''
                     }
                     post {
