@@ -90,13 +90,17 @@ export async function startSession(): Promise<{
     setTimeout(done, 1_000);
   });
 
+  // tauri-driver capability shape per upstream Tauri docs:
+  // https://tauri.app/develop/tests/webdriver/example/webdriverio/
+  // browserName is intentionally OMITTED — the driver picks the right
+  // WebKit-side driver based on tauri:options.application. The webdriverio
+  // v9 type bundle doesn't model tauri-specific caps; the cast bypasses it.
   const browser = await remote({
     hostname: '127.0.0.1',
     port: TAURI_DRIVER_PORT,
     capabilities: {
-      browserName: 'wry',
       'tauri:options': { application: binary },
-    } as never, // wry/tauri caps not in webdriverio's stock types
+    } as never,
     logLevel: 'warn',
   });
 
