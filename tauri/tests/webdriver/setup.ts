@@ -75,10 +75,30 @@ export async function startSession(): Promise<{
     driver,
     ['--port', String(TAURI_DRIVER_PORT), '--native-driver', wkwd],
     {
-      env: { ...process.env, TAURI_BIN: binary },
+      env: {
+        ...process.env,
+        TAURI_BIN: binary,
+        // Spec: any panic on the Rust side (in tauri-driver itself, in the
+        // wry/tao stack, or in our crate) should print a backtrace so we
+        // can actually debug crashes — without this `tauri-driver` swallows
+        // the binary's stderr silently.
+        RUST_BACKTRACE: '1',
+        // WebKitGTK telemetry / a11y bus probes can hang the WebView in
+        // headless containers. Skip them.
+        WEBKIT_DISABLE_COMPOSITING_MODE: '1',
+        WEBKIT_DISABLE_DMABUF_RENDERER: '1',
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
+
+  // Tee tauri-driver's stderr/stdout to our own so panics + GTK warnings
+  // from the launched binary surface in the vitest log. Without this the
+  // failure modes are "session creation hangs" / "invalid session id" with
+  // zero diagnostic — which is exactly what made the first few Jenkins
+  // iterations expensive.
+  driverProc.stdout?.on('data', (b: Buffer) => process.stdout.write(`[tauri-driver] ${b}`));
+  driverProc.stderr?.on('data', (b: Buffer) => process.stderr.write(`[tauri-driver] ${b}`));
 
   // Wait for tauri-driver to bind the port (it logs to stderr on bind).
   await new Promise<void>((resolve, reject) => {
