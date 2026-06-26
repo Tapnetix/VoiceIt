@@ -258,6 +258,22 @@ PYGATE
                             just build-server
                             python3 scripts/ci-disable-updater.py
                             ( cd tauri && bun run tauri build --bundles deb < /dev/null )
+
+                            # ─── Real-Tauri WebDriver E2E (T-TS-03 / S17a) ────
+                            # Drives the just-built voiceit binary through
+                            # tauri-driver + WebKitWebDriver (system, installed
+                            # via webkit2gtk-driver on pockeo-linux). The suite
+                            # at tauri/tests/webdriver/ remediates the audit's
+                            # HIGH `surface-proxy` finding — the dev-web
+                            # Playwright suite verifies the browser surface,
+                            # NOT the packaged Tauri IPC path.
+                            #
+                            # Non-fatal initially (|| true) so the bring-up run
+                            # surfaces its real failure mode in the build log
+                            # without flipping Verify red. Remove the || true
+                            # once known-green (planned follow-up).
+                            command -v tauri-driver >/dev/null 2>&1 || cargo install tauri-driver --locked
+                            ( cd tauri/tests/webdriver && bun x vitest run ) || echo "::warning::tauri-e2e suite failed — see log above. Non-fatal during bring-up."
                         '''
                     }
                     post {

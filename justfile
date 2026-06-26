@@ -303,12 +303,15 @@ test-coverage: _ensure-venv
 test-e2e:
     cd {{ app_dir }} && bunx playwright test
 
-# Run the real-Tauri E2E suite (audit S17a/S17b/S18-S21) against the
-# packaged Tauri binary via tauri-driver. Linux-only. Requires
-# WebKitWebDriver + tauri-driver — see app/e2e/fixtures-tauri.ts header
-# for install instructions. Throws with a clear hint if a dep is missing.
+# Run the real-Tauri WebDriver E2E suite (audit S17a/S17b/S18-S21) against
+# the packaged voiceit binary via tauri-driver + WebKitWebDriver. Linux only
+# (tauri-driver doesn't support macOS). See tauri/tests/webdriver/README.md
+# for the dependency contract; throws with a clear hint if anything's
+# missing. The packaged binary must exist at
+# tauri/src-tauri/target/release/voiceit — run `cd tauri && bun run tauri
+# build` first.
 test-e2e-tauri:
-    cd {{ app_dir }} && E2E_SURFACE=tauri bunx playwright test
+    cd tauri/tests/webdriver && bun x vitest run
 
 # E2E: generate with every TTS model against the frozen binary (pass extra flags like --only kokoro)
 [unix]
