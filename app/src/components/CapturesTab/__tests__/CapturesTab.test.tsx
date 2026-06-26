@@ -419,6 +419,77 @@ describe('CapturesTab — export audio via plugin-dialog + plugin-fs', () => {
   });
 });
 
+describe('CapturesTab — copy transcript to clipboard', () => {
+  it('writes the selected refined transcript to navigator.clipboard on Copy click', async () => {
+    // userEvent v14's setup() installs its OWN clipboard polyfill on
+    // navigator.clipboard, which clobbers any stub installed beforehand.
+    // We must construct the user-event session first, THEN install our stub
+    // on top so the component's writeText call lands on our spy. (This is the
+    // exact 160k-token rabbit hole flagged in the T-UT-CAPTURES brief.)
+    const user = userEvent.setup();
+
+    // JSDOM ships no real Clipboard API; install a configurable stub on
+    // window.navigator so the component's `await navigator.clipboard.writeText(...)`
+    // resolves into something we can assert on. configurable:true is required
+    // because vitest's jsdom env locks down navigator props by default — this
+    // is the exact JSDOM workaround called out in the T-CT-01 brief.
+    const clipboardWriteText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'clipboard', {
+      value: { writeText: clipboardWriteText },
+      configurable: true,
+    });
+
+    renderWithQuery();
+    await flushAsync();
+
+    // Pre-seed a capture via the listen() callback (same path as the export
+    // test) so a selection exists. showRefined defaults to true in the
+    // component, so the copy handler picks transcript_refined.
+    captureBackingState.items = [sampleCapture];
+    captureBackingState.total = 1;
+    const createdReg = findListener('capture:created');
+    await act(async () => {
+      (createdReg.handler as (event: unknown) => void)({
+        event: 'capture:created',
+        id: 1,
+        payload: { capture: sampleCapture },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Confirm the detail pane rendered with the seeded capture before we look
+    // for the button — without a selection, handleCopy early-returns and the
+    // clipboard never gets called.
+    await screen.findAllByText(/Refined sentence from the LLM\./);
+
+    // i18n key `captures.actions.copy` resolves to "Copy" in en/translation.json.
+    // The button is a plain <Button> (not a Radix portal item), so userEvent
+    // click is straightforward — no pointer-event dance like the dropdown.
+    const copyButton = await screen.findByRole('button', { name: /^Copy$/i });
+    await user.click(copyButton);
+
+    // Let the handler's await navigator.clipboard.writeText(...) resolve.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Shape assertion on the clipboard boundary: exactly one writeText call,
+    // and its first argument is the refined transcript from the selected
+    // capture. Asserting the call shape — not a count on an internal
+    // collaborator — so a regression that swapped showRefined polarity or
+    // dropped the await would surface here.
+    expect(clipboardWriteText.mock.calls.length).toBe(1);
+    const writeArgs = clipboardWriteText.mock.calls[0] as unknown[];
+    expect(writeArgs[0]).toBe('Refined sentence from the LLM.');
+  });
+});
+
 describe('CapturesTab — listener cleanup on unmount', () => {
   it('invokes every unlisten function returned by listen() exactly once when unmounted', async () => {
     const { unmount } = renderWithQuery();
