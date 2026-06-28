@@ -5,6 +5,46 @@
 
 # Changelog
 
+## [0.9.0] - 2026-06-28
+
+**Quality and CI release.** No user-visible feature changes — the work behind this version is a full re-audit of the test suite, a real backend bug fix, and a CI gate that prevents future API drift.
+
+### Bug fixes
+
+- **`GET /profiles/{id}/export` now returns 404 instead of 500 for missing profiles** (U-py-012). The route's catch-all `except Exception` was swallowing the explicit `HTTPException(404, "Profile not found")` and re-raising it as a 500 with `detail='404: Profile not found'`. The prior release shipped this as an `@pytest.mark.xfail(strict=True)` — the test "passed" by being expected to fail. Now the route narrows the catch with `except HTTPException: raise` before the catch-all, and the test asserts a real 404.
+
+### New CI gates (catches future drift before users see it)
+
+- **OpenAPI client drift gate** in Jenkins Verify. The TypeScript API client at `app/src/lib/api/` is generated from FastAPI's `/openapi.json` by `scripts/generate-api.sh`. Before this release the regeneration was a manual step and the committed client had silently fallen 40 files / ~4 000 lines out of sync with the backend (missing ~20 model types added since the last manual regen — `LLMGenerate*`, `MCPClientBinding*`, `Story*`, `Preview*`, etc.). CI now re-runs the generator on every build and fails if the committed client differs.
+- **Widened JS coverage measurement.** Vitest's `coverage.include` was narrowed to a 7-pattern allow-list (~25 of 193 source files); the 91.92 % statement coverage in the prior release reflected the audited slice, not the app. Now we measure all of `src/**` (with explicit excludes only for the Tauri-IPC components that are verified through a separate path). Honest baseline drops to 35 % — closing the remainder is the next audit cycle.
+- **Un-ignored test suite hygiene.** `backend/tests/test_profile_duplicate_names.py` (6 tests covering create_profile/update_profile duplicate detection) was `--ignore=`'d in CI with no documented reason; verified passing in isolation and unblocked.
+
+### New test coverage (35 cases against previously-untested surface)
+
+- **Tauri-IPC components.** `DictateWindow`, `AccessibilityGate`, `InputMonitoringGate`, and `CapturesTab` directly call `@tauri-apps/api/core` and `@tauri-apps/api/event` and previously had zero tests. Added focused unit suites (`vi.mock('@tauri-apps/...')` at the OS/runtime boundary) covering listener cleanup, permission-gate state transitions, save-to-disk via `plugin-dialog` + `plugin-fs`, and clipboard write.
+- **Restored orphaned coverage** of `useAudioRecording`'s MediaStream cleanup (`cancelRecording stops every track`, unmount cleanup, second-cycle hygiene) and `booksStore`'s reset / malformed-hydration invariants — both had been exercised only through misanchored acceptance specs that got rewritten this release.
+
+### Test-quality cleanup
+
+- Replaced 84 call-count / vacuous / implementation-named assertions across 19 test files with behavior-shape assertions on observable outcomes (DOM state, store state, react-query cache state, persisted-fixture mutations).
+- Rewrote two acceptance specs that had been anchored on the wrong scenarios: `s5.test.ts` was testing MediaStream cleanup instead of dialogue reassignment; `s6.test.ts` was testing booksStore lifecycle instead of audio generation. Both now exercise the real S5/S6 user-observable outcomes against the real `ChapterEditor` and `BookOverview` components.
+- Bumped Python tests from 1 765 → 1 772 (+6 from un-ignoring `test_profile_duplicate_names.py`, +1 from flipping the U-py-012 xfail).
+
+### Tauri-driver WebDriver E2E framework (scaffolded)
+
+- New `tauri/tests/webdriver/` suite that drives the real packaged voiceit binary via `tauri-driver` + `webdriverio` (not the dev-web Playwright proxy). Verified end-to-end through 8 CI iterations: capability shape, headless display via `xvfb-run`, backend prelaunch, panic-diagnostic capture.
+- One known blocker on the CI agents: a `tao` `Option::unwrap()` panic in `glib::main_context_channel::dispatch` reproduces on Ubuntu 22.04 (glib 2.72) but NOT on Ubuntu 24.04 (glib 2.80). Local boot smoke passes; CI build doesn't. The Jenkinsfile gates the E2E step as non-fatal until the agents are upgraded or the workload containerized.
+
+### Dependency bumps
+
+- `tauri` 2.9.5 → 2.11.3 (tao 0.34.5 → 0.35.3, wry 0.53.5 → 0.55.1, webkit2gtk 2.0.1 → 2.0.2) — attempted as a tao panic mitigation; doesn't fix the CI issue but is current-minor and clean to ship.
+- `webdriverio` 9.29.0 (new — for the Tauri E2E suite).
+- `vitest` aligned at 4.1.7 across all workspaces.
+
+### Documentation
+
+- New audit deliverables checked in at the repo root: `audit-report.md`, `design.md`, `plan.json`, `plan.md`, `verify-report.md`. These document the audit's scope decisions and the remaining work (notably the ~50 source files still at 0 % coverage post-widen — the "long-tail" follow-up cycle).
+
 ## [0.8.0] - 2026-06-07
 
 **Auto-filled reference transcripts.** Cloning a voice no longer means typing out what was said — VoiceIt transcribes the clip for you and lets you correct it.
