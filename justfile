@@ -48,23 +48,27 @@ setup-python:
     # linacodec needing uv_build) reporting "Could not find a version that
     # satisfies the requirement … (from versions: none)" — pip falls back
     # to find-links pages when PyPI times out and only the configured
-    # find-links pages are searched. The bump keeps the resolver patient
-    # enough to wait out the slow link rather than masking PyPI's
-    # response as "no versions exist".
-    PIP_NET="--timeout 90 --retries 5"
-    {{ pip }} install $PIP_NET --upgrade pip -q
-    {{ pip }} install $PIP_NET -r {{ backend_dir }}/requirements.txt
+    # find-links pages are searched.
+    #
+    # MUST be env vars, not CLI flags: linacodec uses pip's "build
+    # isolation" feature which spawns a separate venv whose pip doesn't
+    # inherit the parent invocation's --timeout/--retries. PIP_*
+    # environment vars are read by every pip in the process tree.
+    export PIP_DEFAULT_TIMEOUT=90
+    export PIP_RETRIES=5
+    {{ pip }} install --upgrade pip -q
+    {{ pip }} install -r {{ backend_dir }}/requirements.txt
     # Chatterbox pins numpy<1.26 / torch==2.6 which break on Python 3.12+
-    {{ pip }} install $PIP_NET --no-deps chatterbox-tts
+    {{ pip }} install --no-deps chatterbox-tts
     # HumeAI TADA pins torch>=2.7,<2.8 which conflicts with our torch>=2.1
-    {{ pip }} install $PIP_NET --no-deps hume-tada
+    {{ pip }} install --no-deps hume-tada
     # Apple Silicon: install MLX backend
     if [ "$(uname -m)" = "arm64" ] && [ "$(uname)" = "Darwin" ]; then
         echo "Detected Apple Silicon — installing MLX dependencies..."
-        {{ pip }} install $PIP_NET -r {{ backend_dir }}/requirements-mlx.txt
+        {{ pip }} install -r {{ backend_dir }}/requirements-mlx.txt
     fi
-    {{ pip }} install $PIP_NET git+https://github.com/QwenLM/Qwen3-TTS.git
-    {{ pip }} install $PIP_NET pyinstaller ruff pytest pytest-asyncio pytest-cov -q
+    {{ pip }} install git+https://github.com/QwenLM/Qwen3-TTS.git
+    {{ pip }} install pyinstaller ruff pytest pytest-asyncio pytest-cov -q
     echo "Python environment ready."
 
 [windows]
@@ -78,6 +82,11 @@ setup-python:
         & {{ system_python }} -m venv {{ venv }}; \
     }
     Write-Host "Installing Python dependencies..."
+    # PyPI gets flaky from these agents; bump pip's network knobs via env
+    # vars so even the isolated build-deps invocations inherit them. Same
+    # rationale as the unix recipe — see comment there.
+    $env:PIP_DEFAULT_TIMEOUT = "90"
+    $env:PIP_RETRIES = "5"
     & "{{ python }}" -m pip install --upgrade pip -q
     $gpus = Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name
     Write-Host "Detected GPUs: $($gpus -join ', ')"
