@@ -42,19 +42,29 @@ setup-python:
         {{ system_python }} -m venv {{ venv }}
     fi
     echo "Installing Python dependencies..."
-    {{ pip }} install --upgrade pip -q
-    {{ pip }} install -r {{ backend_dir }}/requirements.txt
+    # Bump pip's timeout from the 15s default to 90s and the retries to 5.
+    # The pockeo-linux Jenkins agents see intermittent ReadTimeoutError
+    # against pypi.org which surfaces as transitive build-deps (e.g.
+    # linacodec needing uv_build) reporting "Could not find a version that
+    # satisfies the requirement … (from versions: none)" — pip falls back
+    # to find-links pages when PyPI times out and only the configured
+    # find-links pages are searched. The bump keeps the resolver patient
+    # enough to wait out the slow link rather than masking PyPI's
+    # response as "no versions exist".
+    PIP_NET="--timeout 90 --retries 5"
+    {{ pip }} install $PIP_NET --upgrade pip -q
+    {{ pip }} install $PIP_NET -r {{ backend_dir }}/requirements.txt
     # Chatterbox pins numpy<1.26 / torch==2.6 which break on Python 3.12+
-    {{ pip }} install --no-deps chatterbox-tts
+    {{ pip }} install $PIP_NET --no-deps chatterbox-tts
     # HumeAI TADA pins torch>=2.7,<2.8 which conflicts with our torch>=2.1
-    {{ pip }} install --no-deps hume-tada
+    {{ pip }} install $PIP_NET --no-deps hume-tada
     # Apple Silicon: install MLX backend
     if [ "$(uname -m)" = "arm64" ] && [ "$(uname)" = "Darwin" ]; then
         echo "Detected Apple Silicon — installing MLX dependencies..."
-        {{ pip }} install -r {{ backend_dir }}/requirements-mlx.txt
+        {{ pip }} install $PIP_NET -r {{ backend_dir }}/requirements-mlx.txt
     fi
-    {{ pip }} install git+https://github.com/QwenLM/Qwen3-TTS.git
-    {{ pip }} install pyinstaller ruff pytest pytest-asyncio pytest-cov -q
+    {{ pip }} install $PIP_NET git+https://github.com/QwenLM/Qwen3-TTS.git
+    {{ pip }} install $PIP_NET pyinstaller ruff pytest pytest-asyncio pytest-cov -q
     echo "Python environment ready."
 
 [windows]
